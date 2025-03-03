@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import torch
 import logging
+import ta
 
 logger = logging.getLogger("TradingBot.DataProcessor")
 
@@ -19,152 +20,54 @@ class DataProcessor:
         # Cache for technical indicators
         self.indicators_cache = {}
         self.cache_max_size = 10  # Maximum number of DataFrames to keep in cache
+        self.feature_scaler_fitted = False
         
     def add_technical_indicators(self, df):
-        """Adds technical indicators"""
+        """Add technical indicators to DataFrame"""
         try:
-            # Check cache first using DataFrame start/end time as key
-            if len(df) > 0:
-                cache_key = f"{df['time'].min()}_{df['time'].max()}_{len(df)}"
-                if cache_key in self.indicators_cache:
-                    logger.debug(f"Using cached indicators for {cache_key}")
-                    return self.indicators_cache[cache_key]
+            # Gerekli sütunların varlığını kontrol et
+            required_columns = ['open', 'high', 'low', 'close', 'tick_volume']
+            missing_columns = [col for col in required_columns if col not in df.columns]
             
-            # Make a copy to avoid modifying the original DataFrame
+            if missing_columns:
+                logger.error(f"Kritik sütunlar eksik: {missing_columns}")
+                return None
+            
             df = df.copy()
             
-            # Minimum data check
-            min_periods = max(26, 20, 14)  # Maximum of MACD(26), BB(20), and ATR(14) periods
-            if len(df) < min_periods:
-                logger.warning(f"Not enough data for technical indicators (need at least {min_periods} periods)")
-                print(f"Warning: Not enough data for technical indicators (need at least {min_periods} periods)")
-                return df
+            # Minimum veri kontrolü
+            if len(df) < 30:  # En az 30 mum gerekli
+                logger.error("Teknik göstergeler için yeterli veri yok")
+                return None
             
-            # Fill any existing NaN values before calculations
-            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            # RSI hesaplama
+            df['RSI'] = ta.momentum.rsi(df['close'], window=14)
             
-            # Use optimized calculation functions when data size is large
-            if len(df) > 1000:
-                logger.debug(f"Using optimized calculations for {len(df)} rows")
-                return self._add_technical_indicators_optimized(df)
+            # MACD hesaplama
+            macd = ta.trend.macd(df['close'])
+            df['MACD'] = macd
+            df['Signal_Line'] = ta.trend.macd_signal(df['close'])
             
-            # RSI (14 periods)
-            try:
-                delta = df['close'].diff()
-                gain = (delta.where(delta > 0, 0)).fillna(0)
-                loss = (-delta.where(delta < 0, 0)).fillna(0)
-                
-                # Use minimum periods to handle initial data
-                gain_avg = gain.rolling(window=14, min_periods=1).mean()
-                loss_avg = loss.rolling(window=14, min_periods=1).mean()
-                
-                # Handle potential division by zero
-                rs = gain_avg / loss_avg.replace(0, 0.001)
-                df['RSI'] = 100 - (100 / (1 + rs))
-                
-                # Ensure RSI values are in valid range (0-100)
-                df['RSI'] = df['RSI'].clip(0, 100)
-                
-                # Fill any NaN values
-                if df['RSI'].isnull().any():
-                    df['RSI'] = df['RSI'].fillna(50)  # Default to neutral RSI
-            except Exception as e:
-                logger.error(f"Error in RSI calculation: {str(e)}")
-                # Create default RSI values
-                df['RSI'] = 50  # Default to neutral RSI value
+            # ATR hesaplama
+            df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
             
-            # MACD (12, 26, 9)
-            exp1 = df['close'].ewm(span=12, adjust=False, min_periods=5).mean()
-            exp2 = df['close'].ewm(span=26, adjust=False, min_periods=5).mean()
-            df['MACD'] = exp1 - exp2
-            df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False, min_periods=5).mean()
+            # Bollinger Bands
+            df['MA20'] = ta.trend.sma_indicator(df['close'], window=20)
+            bollinger = ta.volatility.BollingerBands(df['close'])
+            df['Upper_Band'] = bollinger.bollinger_hband()
+            df['Lower_Band'] = bollinger.bollinger_lband()
             
-            # Bollinger Bands (20 periods)
-            df['MA20'] = df['close'].rolling(window=20, min_periods=5).mean()
-            df['20dSTD'] = df['close'].rolling(window=20, min_periods=5).std()
-            df['Upper_Band'] = df['MA20'] + (df['20dSTD'] * 2)
-            df['Lower_Band'] = df['MA20'] - (df['20dSTD'] * 2)
+            # NaN değerleri kontrol et
+            if df[self.all_features].isnull().any().any():
+                logger.error("Teknik göstergelerde NaN değerler var")
+                return None
             
-            # ATR (14 periods) - Daha güçlü hesaplama
-            try:
-                # Ensure we have previous day's close
-                if len(df) > 1:
-                    high_low = df['high'] - df['low']
-                    high_close = np.abs(df['high'] - df['close'].shift(1))
-                    low_close = np.abs(df['low'] - df['close'].shift(1))
-                    
-                    # Replace NaNs with 0 in the first row
-                    high_close.iloc[0] = high_low.iloc[0]
-                    low_close.iloc[0] = high_low.iloc[0]
-                    
-                    # Calculate True Range
-                    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-                    ranges = ranges.replace([np.inf, -np.inf], np.nan).fillna(0)
-                    
-                    true_range = np.max(ranges, axis=1)
-                    
-                    # Calculate ATR with more robust method
-                    df['ATR'] = true_range.rolling(window=14, min_periods=5).mean()
-                    
-                    # Alternative ATR calculation if we still have NaNs
-                    if df['ATR'].isnull().any():
-                        logger.info("Using alternative ATR calculation")
-                        # Use simple average of true range for first 14 periods
-                        df['ATR'] = true_range.ewm(span=14, adjust=False, min_periods=5).mean()
-                else:
-                    # Not enough data for ATR
-                    logger.warning("Not enough data for ATR calculation (need at least 2 rows)")
-                    # Use range of the first candle as a fallback
-                    df['ATR'] = df['high'] - df['low']
-            except Exception as e:
-                logger.error(f"Error in ATR calculation: {str(e)}")
-                # Create a simpler ATR as fallback - use 1% of closing price
-                df['ATR'] = df['close'] * 0.01
-            
-            # Check for NaN values in ATR and fix them
-            if df['ATR'].isnull().any():
-                logger.warning(f"NaN values in ATR calculation. NaN count: {df['ATR'].isnull().sum()}")
-                # Calculate the mean of non-NaN ATR values
-                mean_atr = df['ATR'].mean()
-                if np.isnan(mean_atr):
-                    # If all ATRs are NaN, use 1% of price
-                    mean_atr = df['close'].mean() * 0.01
-                # Replace NaN values with the mean ATR
-                df['ATR'] = df['ATR'].fillna(mean_atr)
-            
-            # Final check and fill for all indicators
-            for col in ['RSI', 'MACD', 'Signal_Line', 'MA20', 'Upper_Band', 'Lower_Band', 'ATR']:
-                if col in df.columns and df[col].isnull().any():
-                    df[col] = df[col].fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
-            # Cache the result if it's valid
-            if len(df) > 0 and 'time' in df.columns:
-                cache_key = f"{df['time'].min()}_{df['time'].max()}_{len(df)}"
-                self.indicators_cache[cache_key] = df.copy()
-                
-                # Manage cache size
-                if len(self.indicators_cache) > self.cache_max_size:
-                    # Remove oldest item
-                    oldest_key = next(iter(self.indicators_cache))
-                    del self.indicators_cache[oldest_key]
-                    
             return df
             
         except Exception as e:
-            logger.error(f"Error in add_technical_indicators: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            
-            # Create default values for technical indicators
-            for indicator in ['RSI', 'MACD', 'Signal_Line', 'MA20', 'Upper_Band', 'Lower_Band', 'ATR']:
-                if indicator not in df.columns:
-                    if indicator == 'ATR':
-                        df[indicator] = df['close'] * 0.01  # 1% of price as ATR
-                    else:
-                        df[indicator] = 0
-            
-            return df
-            
+            logger.error(f"Teknik göstergeler hesaplanırken hata: {str(e)}")
+            return None
+        
     def _add_technical_indicators_optimized(self, df):
         """Optimized version of indicator calculation for large datasets"""
         try:
@@ -248,6 +151,17 @@ class DataProcessor:
     def prepare_data(self, df, sequence_length=60):
         """Prepares data for LSTM model"""
         try:
+            # Önce sütunların var olup olmadığını kontrol et
+            required_columns = self.feature_columns.copy()
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                print(f"Adding missing columns to DataFrame: {missing_columns}")
+                for col in missing_columns:
+                    if col == 'tick_volume':
+                        # tick_volume eksikse, varsayılan değerlerle doldur
+                        df[col] = 1
+            
             # Add technical indicators
             df = self.add_technical_indicators(df)
             
@@ -258,6 +172,12 @@ class DataProcessor:
             
             # Fill NaN values
             df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            
+            # Ensure all required columns exist
+            for col in self.feature_columns:
+                if col not in df.columns:
+                    print(f"Error: Required column '{col}' is missing even after preprocessing")
+                    return torch.FloatTensor([]), torch.FloatTensor([])
             
             # Normalize price data
             price_data = df[self.feature_columns].values
@@ -388,4 +308,41 @@ class DataProcessor:
     
     def inverse_transform_price(self, scaled_price):
         """Converts normalized price back to real value"""
-        return self.price_scaler.inverse_transform([[0, 0, 0, scaled_price, 0]])[0][3] 
+        return self.price_scaler.inverse_transform([[0, 0, 0, scaled_price, 0]])[0][3]
+    
+    def prepare_prediction_data(self, df):
+        """Prepares data for prediction"""
+        try:
+            # Veri kontrolü
+            if df is None or len(df) == 0:
+                logger.error("Veri yok")
+                return None
+            
+            # Teknik göstergeleri ekle
+            df = self.add_technical_indicators(df)
+            if df is None:
+                return None
+            
+            # Tüm özelliklerin var olduğunu kontrol et
+            if not all(feature in df.columns for feature in self.all_features):
+                logger.error("Bazı özellikler eksik")
+                return None
+            
+            # Son veriyi al ve ölçeklendir
+            latest_data = df.iloc[-1:][self.all_features]
+            
+            # Feature scaler'ı güncelle ve veriyi ölçeklendir
+            if not self.feature_scaler_fitted:
+                self.feature_scaler.fit(df[self.all_features])
+                self.feature_scaler_fitted = True
+            
+            scaled_data = self.feature_scaler.transform(latest_data)
+            
+            # PyTorch tensor'a çevir
+            tensor_data = torch.FloatTensor(scaled_data).unsqueeze(0)
+            
+            return tensor_data
+            
+        except Exception as e:
+            logger.error(f"Tahmin verisi hazırlanırken hata: {str(e)}")
+            return None 

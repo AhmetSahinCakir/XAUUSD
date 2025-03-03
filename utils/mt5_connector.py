@@ -42,8 +42,18 @@ class MT5Connector:
                 return True
             
             # MT5'i başlat
-            if not mt5.initialize(login=self.login, password=self.password, 
-                                  server=self.server, timeout=self.timeout):
+            # Eğer login, password ve server bilgileri girilmemişse, bunları kullanma
+            init_params = {}
+            if self.login is not None:
+                init_params["login"] = self.login
+            if self.password is not None:
+                init_params["password"] = self.password  
+            if self.server is not None:
+                init_params["server"] = self.server
+            if self.timeout is not None:
+                init_params["timeout"] = self.timeout
+                
+            if not mt5.initialize(**init_params):
                 print(f"MT5 başlatılamadı! Hata kodu: {mt5.last_error()}")
                 self.connected = False
                 return False
@@ -306,19 +316,12 @@ class MT5Connector:
             
             # Doldurma politikası ayarları
             # MT5'te farklı semboller farklı doldurma politikalarını destekleyebilir
-            # Sembolün desteklediği bir doldurma tipi kullanmamız gerekiyor
-            filling_type = None
+            # MT5 sürüm farkları nedeniyle uyumlu bir doldurma tipi kullanıyoruz
+            filling_type = mt5.ORDER_FILLING_RETURN
             
-            # Sembolün hangi doldurma politikalarını desteklediğini kontrol et
-            filling_modes = symbol_info.filling_mode
-            
-            if filling_modes & mt5.SYMBOL_FILLING_FOK:
-                filling_type = mt5.ORDER_FILLING_FOK
-            elif filling_modes & mt5.SYMBOL_FILLING_IOC:
-                filling_type = mt5.ORDER_FILLING_IOC
-            else:
-                # Bazı broker'lar sadece RETURN modunu destekleyebilir
-                filling_type = mt5.ORDER_FILLING_RETURN
+            # Not: Bazı MT5 sürümlerinde SYMBOL_FILLING_FOK ve SYMBOL_FILLING_IOC özellikleri bulunmuyor
+            # Bu nedenle doğrudan ORDER_FILLING_RETURN kullanıyoruz
+            # Daha sonra burada bir try-except ile farklı sürümleri destekleyen kod eklenebilir
             
             # Mevcut fiyatı al (eğer piyasa emri kullanıyorsak)
             if price is None:

@@ -1,8 +1,7 @@
-# MetaTrader 5 Connection Settings
 MT5_CONFIG = {
-    'login': 90674420,        # MT5 account number
-    'password': '_mKtFp2z',   # MT5 main password
-    'server': 'MetaQuotes-Demo'    # Default MT5 demo server
+    'login': 90674420,        # MT5 hesap numaranız (test scriptinden doğrulandı)
+    'password': '_mKtFp2z',   # MT5 ana şifrenizi buraya yazın
+    'server': 'MetaQuotes-Demo'    # MT5 sunucu adınız (test scriptinden doğrulandı)
 }
 
 # Trading Parameters

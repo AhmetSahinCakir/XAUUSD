@@ -32,63 +32,107 @@ logger = logging.getLogger("TradingBot")
 
 class XAUUSDTradingBot:
     def __init__(self):
-        """Initializes the Trading Bot"""
-        logger.info("Initializing XAUUSD Trading Bot...")
-        print("Initializing XAUUSD Trading Bot...")
+        """Initializes Trading Bot"""
+        # Set up paths and config
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = os.path.join(self.base_dir, 'config.json')
         
-        # Kullanıcıya modeli yeniden eğitme seçeneği sun
-        retrain_option = input("Modelleri yeniden eğitmek istiyor musunuz? (y/n): ").strip().lower()
-        self.force_retrain = False
-        self.clear_existing_models = False
+        # Load config
+        self.load_config()
         
-        if retrain_option == 'y':
-            self.force_retrain = True
-            clear_option = input("Mevcut modelleri silip sıfırdan başlamak istiyor musunuz? (y/n): ").strip().lower()
-            if clear_option == 'y':
-                self.clear_existing_models = True
-                print("Mevcut modeller silinecek ve eğitim sıfırdan başlayacak.")
-            else:
-                print("Mevcut modeller üzerine eğitim yapılacak.")
-        else:
-            print("Mevcut modeller kullanılacak (varsa).")
+        # Initialize logger
+        self.setup_logger()
         
-        # Initialize MT5 connection with config
-        self.mt5 = MT5Connector(
-            login=MT5_CONFIG['login'],
-            password=MT5_CONFIG['password'],
-            server=MT5_CONFIG['server']
-        )
+        # Setup MT5 connector
+        self.mt5 = None
         
-        # Establish connection first
-        if not self.mt5.connect():
-            error_msg = "Could not connect to MT5. Please check your credentials and MT5 terminal."
-            logger.error(error_msg)
-            raise ConnectionError(error_msg)
+        # Setup data processor
+        self.data_processor = None
         
-        print("Successfully connected to MT5!")
-        logger.info("Successfully connected to MT5")
+        # Model instances
+        self.lstm_model = None
+        self.rl_trader = None
         
-        # Initialize data processor
-        self.data_processor = DataProcessor()
-        
-        # Initialize risk manager
-        self.risk_manager = RiskManager(
-            initial_balance=TRADING_CONFIG['initial_balance'],
-            risk_per_trade=TRADING_CONFIG['risk_per_trade'],
-            max_daily_loss=TRADING_CONFIG['max_daily_loss']
-        )
-        
-        # Set up timeframes
+        # Timeframes to monitor
         self.timeframes = DATA_CONFIG['timeframes']
         
-        # Load or create models
-        self.load_or_create_models()
+        # Risk Manager
+        self.risk_manager = None
         
-        # Check if models need retraining
-        self.check_and_retrain_models()
+        # Parameters from user
+        self.retrain_models = False
+        self.clear_existing_models = False
         
-        # Trading parameters from config
-        self.current_positions = {}
+        # Initialize everything
+        self.initialize()
+        
+    def initialize(self):
+        """Initializes all components and models"""
+        try:
+            # Create saved_models directory if it doesn't exist
+            os.makedirs('saved_models', exist_ok=True)
+            
+            print("Initializing XAUUSD Trading Bot...")
+            logger.info("Initializing XAUUSD Trading Bot...")
+            
+            # Connect to MT5
+            print("\nMetaTrader 5'e bağlanılıyor...")
+            self.mt5 = MT5Connector()
+            if not self.mt5.connect():
+                raise ConnectionError("Could not connect to MT5. Please check if MT5 is running.")
+            
+            # Show account info
+            account_info = self.mt5.get_account_info()
+            if account_info:
+                print(f"Bağlantı başarılı!")
+                print(f"Hesap: {account_info.login}")
+                print(f"Sunucu: {account_info.server}")
+                print(f"Bakiye: ${account_info.balance:.2f}")
+                print(f"Özsermaye: ${account_info.equity:.2f}")
+                print(f"Marjin: ${account_info.margin:.2f}")
+                print(f"Serbest Marjin: ${account_info.margin_free:.2f}")
+                
+                # Get symbol info
+                symbol_info = self.mt5.symbol_info("XAUUSD")
+                if symbol_info:
+                    print("\nXAUUSD sembol bilgileri:")
+                    print(f"Pip değeri: {symbol_info.point}")
+                    print(f"Spread: {symbol_info.spread} puan")
+                    print(f"Minimum lot: {symbol_info.volume_min}")
+                    print(f"Maksimum lot: {symbol_info.volume_max}")
+                    print(f"Lot adımı: {symbol_info.volume_step}")
+                
+            # Initialize Data Processor
+            self.data_processor = DataProcessor()
+            
+            # Initialize Risk Manager with initial balance from account info
+            initial_balance = account_info.balance if account_info else TRADING_CONFIG['initial_balance']
+            self.risk_manager = RiskManager(initial_balance=initial_balance)
+            
+            # Prompt user for model retraining
+            self.retrain_models = False
+            self.clear_existing_models = False
+            
+            # Prompt user for retraining
+            retrain_input = input("Modelleri yeniden eğitmek istiyor musunuz? (y/n): ")
+            if retrain_input.lower() == 'y':
+                self.retrain_models = True
+                clean_start_input = input("Mevcut modelleri silip sıfırdan başlamak istiyor musunuz? (y/n): ")
+                if clean_start_input.lower() == 'y':
+                    self.clear_existing_models = True
+                    print("Mevcut modeller silinecek ve eğitim sıfırdan başlayacak.")
+            
+            # Load or create models
+            self.load_or_create_models(retrain=self.retrain_models, clean_start=self.clear_existing_models)
+                
+            print("Modeller başarıyla yüklendi.")
+            
+        except Exception as e:
+            logger.error(f"Initialization error: {str(e)}")
+            print(f"Error initializing bot: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
         
     def check_and_retrain_models(self):
         """Check if models need retraining and retrain if necessary"""
@@ -114,7 +158,7 @@ class XAUUSDTradingBot:
         should_retrain = False
         
         # Kullanıcı isterse her zaman yeniden eğit
-        if self.force_retrain:
+        if self.retrain_models:
             logger.info("Kullanıcı isteği üzerine modeller yeniden eğitilecek.")
             should_retrain = True
         elif last_training_time is None:
@@ -145,43 +189,96 @@ class XAUUSDTradingBot:
             except Exception as e:
                 logger.error(f"Error saving training metadata: {str(e)}")
 
-    def load_or_create_models(self):
-        """Loads or creates LSTM and RL models"""
+    def load_or_create_models(self, retrain=False, clean_start=False):
+        """Loads or creates prediction models"""
         try:
-            # Mevcut modelleri silme seçeneği
-            if self.clear_existing_models:
-                print("Mevcut modelleri silme işlemi başlatılıyor...")
-                if os.path.exists('saved_models'):
-                    # Modelleri sil
-                    lstm_files = [f for f in os.listdir('saved_models') if f.startswith('lstm_model_') and f.endswith('.pth')]
-                    rl_files = [f for f in os.listdir('saved_models') if f.startswith('rl_model_') and f.endswith('.zip')]
+            # Check if we need to retrain
+            if retrain:
+                logger.info("Kullanıcı isteği üzerine modeller yeniden eğitilecek.")
+                # If user wants clean start, delete existing models
+                if clean_start:
+                    logger.info("Mevcut modeller silinecek ve eğitim sıfırdan başlayacak.")
                     
-                    for file in lstm_files + rl_files:
-                        try:
+                    # Delete existing model files
+                    deleted_count = 0
+                    print("Mevcut modelleri silme işlemi başlatılıyor...")
+                    for file in os.listdir('saved_models'):
+                        if file.endswith('.pth') or file.endswith('.zip') or file == 'training_metadata.json':
                             os.remove(os.path.join('saved_models', file))
                             print(f"Silindi: {file}")
-                        except Exception as e:
-                            print(f"Dosya silinemedi: {file}, hata: {str(e)}")
-                    
-                    # Metadata dosyasını da sil
+                            deleted_count += 1
+                            
+                    # Delete metadata file
                     if os.path.exists('saved_models/training_metadata.json'):
                         os.remove('saved_models/training_metadata.json')
                         print("Training metadata dosyası silindi.")
+                        
+                    if deleted_count > 0:
+                        print("Mevcut modeller silindi.")
+                    else:
+                        print("Silinecek model bulunamadı.")
                     
-                    print("Mevcut modeller silindi.")
-                else:
-                    print("Silinecek model bulunamadı.")
-                
-                # Sıfırdan modeller oluştur
-                self.lstm_model = LSTMPredictor(
-                    input_size=MODEL_CONFIG['lstm']['input_size'],
-                    hidden_size=MODEL_CONFIG['lstm']['hidden_size'],
-                    num_layers=MODEL_CONFIG['lstm']['num_layers'],
-                    dropout=MODEL_CONFIG['lstm']['dropout']
-                )
-                self.rl_trader = None
-                logger.info("Yeni modeller oluşturuldu, eğitim sıfırdan başlayacak.")
-                return
+                    # Sıfırdan modeller oluştur
+                    self.lstm_model = LSTMPredictor(
+                        input_size=MODEL_CONFIG['lstm']['input_size'],
+                        hidden_size=MODEL_CONFIG['lstm']['hidden_size'],
+                        num_layers=MODEL_CONFIG['lstm']['num_layers'],
+                        dropout=MODEL_CONFIG['lstm']['dropout']
+                    )
+                    self.rl_trader = None
+                    logger.info("Yeni modeller oluşturuldu, eğitim sıfırdan başlayacak.")
+                    
+                    # Modelleri eğit
+                    self.train_models()
+                    
+                    # Eğitim sonrası, modellerin tekrar yüklenmesi gerekebilir
+                    # Metadata dosyasını kontrol et
+                    if os.path.exists('saved_models/training_metadata.json'):
+                        with open('saved_models/training_metadata.json', 'r') as f:
+                            metadata = json.load(f)
+                        
+                        # Metadata'dan model yollarını al
+                        lstm_path = metadata.get('lstm_model_path')
+                        rl_path = metadata.get('rl_model_path')
+                        
+                        # Modelleri yükle
+                        if lstm_path and os.path.exists(lstm_path):
+                            self.lstm_model = LSTMPredictor.load_model(lstm_path)
+                            logger.info(f"LSTM model reloaded from {lstm_path}")
+                        
+                        # Eğitim sonrası RL modelini yükle
+                        if rl_path and os.path.exists(rl_path):
+                            # Get initial data for RL environment
+                            initial_data_dict = {}
+                            for timeframe, num_candles in DATA_CONFIG['default_candles'].items():
+                                data = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=num_candles)
+                                if data is not None and len(data) >= num_candles * 0.8:
+                                    initial_data_dict[timeframe] = data
+                            
+                            # Combine all data
+                            if initial_data_dict:
+                                initial_data = pd.concat(initial_data_dict.values())
+                                
+                                # Set up environment parameters
+                                env_params = {
+                                    'df': initial_data,
+                                    'lstm_model': self.lstm_model,
+                                    'initial_balance': TRADING_CONFIG['initial_balance'],
+                                    'max_position_size': 1.0,
+                                    'transaction_fee': TRADING_CONFIG['transaction_fee']
+                                }
+                                
+                                # Load RL model
+                                try:
+                                    self.rl_trader = RLTrader(lstm_model=self.lstm_model, env_params=env_params)
+                                    self.rl_trader.load(rl_path)
+                                    logger.info(f"RL model reloaded from {rl_path}")
+                                except Exception as e:
+                                    logger.error(f"Error loading RL model: {str(e)}")
+                                    print(f"RL model yüklenemedi: {str(e)}")
+                                    self.rl_trader = None
+                    
+                    return
             
             # Check for saved models
             lstm_files = [f for f in os.listdir('saved_models') if f.startswith('lstm_model_') and f.endswith('.pth')]
@@ -452,274 +549,191 @@ class XAUUSDTradingBot:
             raise
         
     def get_trading_signals(self, timeframe):
-        """Generates trading signals for each timeframe"""
+        """Gets trading signals from both LSTM and RL models"""
         try:
-            # Get different amounts of data for each timeframe
-            candle_counts = {
-                "1m": 5000,   # Increased for better ATR calculation
-                "5m": 2000,   # Increased for better ATR calculation
-                "15m": 1000   # Increased for better ATR calculation
-            }
-            
-            num_candles = candle_counts.get(timeframe, 2000)  # Default to 2000 candles
-            print(f"\nFetching {num_candles} candles for {timeframe} timeframe...")
-            
-            data = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=num_candles)
-            
-            if data is None:
-                print(f"Error: Could not fetch data for {timeframe} timeframe")
+            # Get latest data
+            data = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=100)  # Get last 100 candles
+            if data is None or len(data) < 60:  # Need at least 60 candles for sequence
+                logger.error(f"Not enough data for {timeframe} timeframe")
                 return None, None
-                
-            if len(data) < 100:  # Minimum required for technical indicators
-                print(f"Error: Not enough data points for {timeframe} timeframe (got {len(data)}, need at least 100)")
+            
+            # Ensure we have a DataFrame
+            if not isinstance(data, pd.DataFrame):
+                data = pd.DataFrame(data)
+            
+            # Ensure required columns exist
+            required_columns = ['open', 'high', 'low', 'close']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                logger.error(f"Critical columns missing: {missing_columns}")
                 return None, None
-                
-            # Print data summary for debugging
-            print(f"Received {len(data)} candles for {timeframe} timeframe")
-            print(f"Data range: {data['time'].min()} to {data['time'].max()}")
-                
-            # Prepare data and add technical indicators
+            
+            # Add technical indicators
+            df = self.data_processor.add_technical_indicators(data)
+            
+            # Check if technical indicators were added successfully
+            if df is None:
+                logger.error("Failed to add technical indicators")
+                return None, None
+            
+            # Prepare data for LSTM prediction
             try:
-                # Skip add_technical_indicators here, it will be called in prepare_data
-                sequences, _ = self.data_processor.prepare_data(data)
-                
-                if len(sequences) == 0:
-                    print(f"Error: Could not prepare LSTM sequences for {timeframe}")
-                    return None, None
-                
-                # Add indicators for the RL model
-                data = self.data_processor.add_technical_indicators(data)
-                
-                if 'ATR' not in data.columns or data['ATR'].isnull().all():
-                    print(f"Error: ATR calculation failed for {timeframe} timeframe")
-                    return None, None
-                
-                # Check for NaN values in key columns
-                nan_cols = [col for col in data.columns if data[col].isnull().any()]
-                if nan_cols:
-                    print(f"Warning: NaN values found in columns: {nan_cols}")
-                    # Fill NaN values
-                    data = data.fillna(method='ffill').fillna(method='bfill').fillna(0)
-                    
-                print(f"Successfully calculated indicators for {timeframe} timeframe")
-                
+                lstm_data = self.data_processor.prepare_prediction_data(df.tail(1))
             except Exception as e:
-                print(f"Error calculating technical indicators for {timeframe}: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                return None, None
-                
-            # LSTM prediction
-            try:
-                lstm_prediction = self.lstm_model.predict(sequences[-1].unsqueeze(0))
-                
-                # Check if prediction is valid
-                if torch.isnan(lstm_prediction).any() or torch.isinf(lstm_prediction).any():
-                    print(f"Error: Invalid LSTM prediction for {timeframe}")
-                    return None, None
-                
-                # Tensor'u float'a çevir
-                lstm_prediction_value = lstm_prediction.item()
-                    
-            except Exception as e:
-                print(f"Error in LSTM prediction for {timeframe}: {str(e)}")
+                logger.error(f"Error preparing LSTM data: {str(e)}")
                 return None, None
             
-            # RL prediction for current state
+            # Get LSTM prediction
+            lstm_pred = None
             try:
-                # Pass the latest row for RL state preparation
-                current_state = self.data_processor.prepare_rl_state(data.iloc[-1])
-                
-                # Check if state is valid
-                if torch.isnan(current_state).any():
-                    print(f"Error: Invalid RL state for {timeframe} (contains NaN)")
-                    return None, None
-                
-                # Check observation space dimension and adjust if necessary
-                if len(current_state.shape) == 1:
-                    current_state = current_state.unsqueeze(0)  # Add batch dimension
-                
-                # Get RL action
-                rl_action, _ = self.rl_trader.predict(current_state)
-                
-                print(f"Generated predictions for {timeframe} - LSTM: {lstm_prediction_value:.2f}, RL: {rl_action[0]}")
-                return lstm_prediction_value, rl_action[0]
-                
+                self.lstm_model.eval()  # Set model to evaluation mode
+                with torch.no_grad():
+                    lstm_pred = self.lstm_model(lstm_data)
+                lstm_pred = lstm_pred.item()  # Convert tensor to scalar
             except Exception as e:
-                print(f"Error in RL prediction for {timeframe}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error in LSTM prediction: {str(e)}")
                 return None, None
-                
+            
+            # Prepare state for RL model
+            try:
+                rl_state = self.data_processor.prepare_rl_state(df.tail(1))
+            except Exception as e:
+                logger.error(f"Error preparing RL state: {str(e)}")
+                return lstm_pred, None
+            
+            # Get RL action
+            rl_action = None
+            try:
+                if self.rl_trader and self.rl_trader.model:
+                    rl_action, _ = self.rl_trader.predict(rl_state)
+            except Exception as e:
+                logger.error(f"Error in RL prediction: {str(e)}")
+                return lstm_pred, None
+            
+            return lstm_pred, rl_action
+            
         except Exception as e:
-            print(f"Error in get_trading_signals for {timeframe}: {str(e)}")
+            logger.error(f"Error in get_trading_signals: {str(e)}")
             import traceback
-            traceback.print_exc()
+            logger.error(traceback.format_exc())
             return None, None
         
     def execute_trade(self, timeframe, lstm_pred, rl_action):
         """Execute trades based on model predictions"""
         try:
             print(f"\n====== TİCARET YÜRÜTME BAŞLANGIÇ ({timeframe}) ======")
-            # Get latest data for trade execution
+            
+            # MT5 bağlantısını kontrol et
+            if not self.mt5.connected:
+                logger.error("MT5 bağlantısı yok")
+                return
+            
+            # Güncel fiyat bilgisini al
+            current_price = self.mt5.get_current_price("XAUUSD")
+            if current_price is None:
+                logger.error("Fiyat bilgisi alınamadı")
+                return
+            
+            # Son 100 mumu al
             data = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=100)
-            
-            if data is None or len(data) < 30:  # Minimum data requirement
-                print(f"Uyarı: {timeframe} için yeterli veri yok, işlem iptal edildi")
-                print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
+            if data is None or len(data) < 30:
+                logger.error(f"{timeframe} için yeterli veri yok")
                 return
-                
-            # Add technical indicators
-            data = self.data_processor.add_technical_indicators(data)
             
-            # Check if ATR is calculated correctly
-            if 'ATR' not in data.columns or data['ATR'].isnull().all() or data['ATR'].iloc[-1] == 0:
-                print(f"Uyarı: {timeframe} için ATR değeri hesaplanamadı, işlem iptal edildi")
-                print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
+            # Teknik göstergeleri hesapla
+            df = self.data_processor.add_technical_indicators(data)
+            if df is None:
+                logger.error("Teknik göstergeler hesaplanamadı")
                 return
-                
-            current_price = data['close'].iloc[-1]
-            atr_value = data['ATR'].iloc[-1]
             
-            # Print ATR value for debugging
-            print(f"Mevcut fiyat: {current_price}, ATR: {atr_value}")
+            # ATR değerini al
+            atr = df['ATR'].iloc[-1]
+            if np.isnan(atr) or atr <= 0:
+                logger.error("Geçersiz ATR değeri")
+                return
             
-            # Determine trade direction based on models
-            # LSTM prediction > 0.55 indicates up, < 0.45 indicates down
-            # RL action: 0 = hold, 1 = buy, 2 = sell
-            trade_allowed = False
-            trade_type = None
+            print(f"Mevcut fiyat: {current_price}, ATR: {atr}")
             
-            if rl_action == 1 and lstm_pred > 0.55:  # Both models agree on BUY
-                trade_type = "BUY"
-                trade_allowed = True
+            # İşlem sinyallerini kontrol et
+            if rl_action == 1 and lstm_pred > 0.55:  # ALIM
+                trade_type = mt5.ORDER_TYPE_BUY
                 print(f"ALIM sinyali: LSTM ({lstm_pred:.2f}) ve RL ({rl_action}) aynı yönde")
-            elif rl_action == 2 and lstm_pred < 0.45:  # Both models agree on SELL
-                trade_type = "SELL"
-                trade_allowed = True
+            elif rl_action == 2 and lstm_pred < 0.45:  # SATIM
+                trade_type = mt5.ORDER_TYPE_SELL
                 print(f"SATIM sinyali: LSTM ({lstm_pred:.2f}) ve RL ({rl_action}) aynı yönde")
             else:
                 print(f"İşlem sinyali yok: LSTM ({lstm_pred:.2f}) ve RL ({rl_action}) uyumsuz")
-                
-            # Execute trade if both models agree and risk management allows
-            if trade_allowed and self.risk_manager.can_trade():
-                # ATR değerini doğrula
-                if atr_value <= 0 or np.isnan(atr_value):
-                    print(f"Uyarı: Geçersiz ATR değeri ({atr_value}), varsayılan değer kullanılıyor")
-                    atr_value = current_price * 0.01  # Fiyatın %1'i
-                
-                # MT5'den sembol bilgilerini al
-                symbol_info = self.mt5.symbol_info("XAUUSD")
-                if symbol_info is None:
-                    print("Uyarı: XAUUSD sembol bilgisi alınamadı, işlem iptal edildi")
-                    print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
-                    return
-                
-                # Pip değeri (point) ve digits değeri
-                point = symbol_info.point
-                digits = symbol_info.digits
-                
-                # SL/TP için asgari mesafeler (genellikle 20-50 pip)
-                min_sl_distance = point * 50
-                min_tp_distance = point * 50
-                
-                # SL/TP hesaplama
-                if trade_type == "BUY":
-                    # BUY için SL, entry'nin altında olmalı
-                    sl_raw = current_price - (atr_value * 1.5)
-                    sl_distance = current_price - sl_raw
-                    
-                    # Minimum mesafeyi kontrol et
-                    if sl_distance < min_sl_distance:
-                        sl_raw = current_price - min_sl_distance
-                        print(f"SL mesafesi çok yakın, minimum {min_sl_distance} değerine ayarlandı")
-                    
-                    # TP, entry'nin üzerinde olmalı, R:R oranına göre
-                    tp_distance = sl_distance * 2  # 1:2 risk-ödül oranı
-                    tp_raw = current_price + tp_distance
-                else:  # SELL
-                    # SELL için SL, entry'nin üzerinde olmalı
-                    sl_raw = current_price + (atr_value * 1.5)
-                    sl_distance = sl_raw - current_price
-                    
-                    # Minimum mesafeyi kontrol et
-                    if sl_distance < min_sl_distance:
-                        sl_raw = current_price + min_sl_distance
-                        print(f"SL mesafesi çok yakın, minimum {min_sl_distance} değerine ayarlandı")
-                    
-                    # TP, entry'nin altında olmalı, R:R oranına göre
-                    tp_distance = sl_distance * 2  # 1:2 risk-ödül oranı
-                    tp_raw = current_price - tp_distance
-                
-                # Fiyatları yuvarlama
-                stop_loss = round(sl_raw, digits)
-                take_profit = round(tp_raw, digits)
-                
-                # Print SL/TP details
-                print(f"Stop Loss: {stop_loss} (mesafe: {abs(current_price - stop_loss):.5f})")
-                print(f"Take Profit: {take_profit} (mesafe: {abs(current_price - take_profit):.5f})")
-                
-                # Calculate position size - hesap bakiyesinin %1'ini riske et
-                account_info = self.mt5.get_account_info()
-                if account_info:
-                    balance = account_info.balance
-                else:
-                    print("Hesap bilgisi alınamadı, varsayılan bakiye kullanılıyor")
-                    balance = TRADING_CONFIG['initial_balance']
-                risk_amount = balance * 0.01  # Hesap bakiyesinin %1'i
-                
-                # Risk miktarını hesapla (stop loss mesafesine göre)
-                point_value = 0.01  # Gold için 1 pip = 0.01 USD (100 oz lot başına)
-                pip_risk = abs(current_price - stop_loss) / point
-                
-                # Pozisyon büyüklüğü (lot) = risk_amount / (pip_risk * point_value * 100)
-                # 100 = 1 lot (100 oz altın)
-                position_size = risk_amount / (pip_risk * point_value * 100)
-                
-                # Lot büyüklüğü sınırları
-                min_lot = 0.01
-                max_lot = 1.0
-                position_size = max(min_lot, min(round(position_size, 2), max_lot))
-                
-                print(f"Hesaplanan lot: {position_size} (Bakiye: ${balance}, Risk: ${risk_amount})")
-                print(f"{trade_type} emri yürütülüyor...")
-                
-                # MT5 bağlantısını kontrol et
-                if not self.mt5.connected:
-                    print("MT5 bağlı değil, bağlanmaya çalışılıyor...")
-                    if not self.mt5.connect():
-                        print("MT5'e bağlanılamadı, emir iptal edildi")
-                        print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
-                        return
-                
-                # Place order
-                order_result = self.mt5.place_order(
-                    symbol="XAUUSD",
-                    order_type=trade_type,
-                    volume=position_size,
-                    price=None,  # Market emri için fiyat belirtme
-                    sl=stop_loss,
-                    tp=take_profit
-                )
-                
-                if order_result:
-                    print(f"İşlem başarıyla gerçekleşti!")
-                    # Trade sonucunu kaydet
-                    self.risk_manager.update_balance(0)  # İşlem başlangıçta sıfır kar/zarar ile başlar
-                else:
-                    print(f"İşlem gerçekleştirilemedi!")
-            elif not trade_allowed:
-                print(f"{timeframe} için ticaret sinyali yok")
-            elif not self.risk_manager.can_trade():
-                print(f"Risk yönetimi {timeframe} için işleme izin vermiyor")
+                return
             
-            print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
+            # Risk yönetimi kontrolü
+            if not self.risk_manager.can_trade():
+                logger.warning("Risk yönetimi işleme izin vermiyor")
+                return
+            
+            # Sembol bilgilerini al
+            symbol_info = self.mt5.get_symbol_info("XAUUSD")
+            if symbol_info is None:
+                logger.error("Sembol bilgisi alınamadı")
+                return
+            
+            # Stop loss ve take profit mesafelerini hesapla
+            min_stop_level = symbol_info.trade_stops_level * symbol_info.point
+            
+            if trade_type == mt5.ORDER_TYPE_BUY:
+                sl_distance = max(atr * 1.5, min_stop_level)
+                tp_distance = sl_distance * 2  # Risk:Reward oranı 1:2
                 
+                sl_price = current_price - sl_distance
+                tp_price = current_price + tp_distance
+                price = symbol_info.ask
+            else:  # SELL
+                sl_distance = max(atr * 1.5, min_stop_level)
+                tp_distance = sl_distance * 2  # Risk:Reward oranı 1:2
+                
+                sl_price = current_price + sl_distance
+                tp_price = current_price - tp_distance
+                price = symbol_info.bid
+            
+            # Lot büyüklüğü hesaplama
+            account_info = self.mt5.get_account_info()
+            if account_info is None:
+                logger.error("Hesap bilgisi alınamadı")
+                return
+            
+            risk_amount = account_info.balance * TRADING_CONFIG['risk_per_trade']
+            pip_value = symbol_info.trade_tick_value
+            pip_distance = abs(price - sl_price) / symbol_info.point
+            
+            lot_size = round(risk_amount / (pip_distance * pip_value), 2)
+            lot_size = max(min(lot_size, symbol_info.volume_max), symbol_info.volume_min)
+            
+            print(f"Stop Loss: {sl_price:.2f} (mesafe: {abs(current_price - sl_price):.2f})")
+            print(f"Take Profit: {tp_price:.2f} (mesafe: {abs(current_price - tp_price):.2f})")
+            print(f"Hesaplanan lot: {lot_size} (Bakiye: ${account_info.balance}, Risk: ${risk_amount})")
+            
+            # Emir gönder
+            order_result = self.mt5.place_order(
+                symbol="XAUUSD",
+                order_type=trade_type,
+                volume=lot_size,
+                price=price,
+                sl=sl_price,
+                tp=tp_price
+            )
+            
+            if order_result and order_result.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"İşlem başarıyla gerçekleşti!")
+                self.risk_manager.update_balance(0)  # İşlem başlangıçta sıfır kar/zarar ile başlar
+            else:
+                error_msg = f"İşlem başarısız: {order_result.comment if order_result else 'Bilinmeyen hata'}"
+                logger.error(error_msg)
+                print(error_msg)
+            
         except Exception as e:
-            print(f"{timeframe} için işlem hatası: {str(e)}")
-            import traceback
-            traceback.print_exc()  # Print full error information
-            print("====== TİCARET YÜRÜTME HATA ======\n")
+            logger.error(f"İşlem hatası: {str(e)}")
+            print(f"İşlem hatası: {str(e)}")
+        finally:
+            print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
         
     def run(self):
         """Runs the Trading Bot"""
@@ -727,6 +741,13 @@ class XAUUSDTradingBot:
         print("Press Ctrl+C to stop the bot")
         print("==============================")
         logger.info("Starting XAUUSD Trading Bot")
+        
+        # RL model kontrolü
+        if self.rl_trader is None:
+            print("\nUYARI: RL modeli bulunamadı veya düzgün yüklenemedi!")
+            print("Bot yalnızca LSTM modeli kullanarak çalışacak.")
+            print("Daha iyi sonuçlar için, bot'u durdurup modelleri yeniden eğitebilirsiniz.")
+            logger.warning("RL model is not initialized, running with LSTM only")
         
         # Memory usage monitoring variables
         last_gc_time = time.time()
@@ -797,6 +818,15 @@ class XAUUSDTradingBot:
         import psutil
         process = psutil.Process(os.getpid())
         return process.memory_info().rss / 1024 / 1024  # Convert to MB
+
+    def load_config(self):
+        """Loads the configuration from config.json"""
+        # Configuration already loaded by global imports
+        pass
+        
+    def setup_logger(self):
+        """Sets up the logger - skip if already set up by global imports"""
+        pass
 
 def check_data_sizes(mt5_connector):
     """
@@ -872,7 +902,11 @@ def main():
         
         # MT5 bağlantısı
         print("\nMetaTrader 5'e bağlanılıyor...")
-        mt5_connector = MT5Connector()
+        mt5_connector = MT5Connector(
+            login=MT5_CONFIG['login'],
+            password=MT5_CONFIG['password'],
+            server=MT5_CONFIG['server']
+        )
         
         # Bağlantı kontrolü
         if not mt5_connector.connected:
@@ -910,10 +944,6 @@ def main():
         
         # Risk yöneticisi oluştur
         risk_manager = RiskManager(mt5_connector)
-        
-        # Modelleri oluştur
-        lstm_model = LSTMPredictor(data_processor)
-        rl_model = RLTrader(data_processor)
         
         # Bot oluştur
         bot = XAUUSDTradingBot()

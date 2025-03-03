@@ -87,4 +87,26 @@ log/
 *.tpl
 experts.dat
 symbols.sel
-*.dat 
+*.dat
+
+# poetry
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   This is especially recommended for binary packages to ensure reproducibility, and is more
+#   commonly ignored for libraries.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+#poetry.lock
+
+# MT5 Trading Bot specific
+logs/
+saved_models/
+.venv/
+.vs/
+.vscode/
+*.pth
+*.zip
+*.pickle
+*.h5
+*.model
+test_*.py
+debug_*.py
+config_personal.py 

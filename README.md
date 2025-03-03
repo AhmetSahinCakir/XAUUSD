@@ -1,84 +1,101 @@
 # XAUUSD Trading Bot
 
-This project is an automated trading bot for XAUUSD (Gold) pair. The bot makes trading decisions using LSTM and Reinforcement Learning (RL) models.
+Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik ticaret botudur. Bot, LSTM ve Pekiştirmeli Öğrenme (RL) modellerini kullanarak ticaret kararları verir.
 
-## 🚀 Features
+## 🚀 Özellikler
 
-- **Multi-Timeframe Analysis**: Simultaneous analysis on 1m, 5m, and 15m charts
-- **Hybrid AI Model**: Combination of LSTM and RL models
-- **Automated Risk Management**: 
-  - Maximum 1% risk per trade
-  - Maximum 5% daily loss limit
-  - ATR-based dynamic stop loss
-  - Take profit based on Risk/Reward ratio
-- **MT5 Integration**: Full integration with MetaTrader 5
+- **Çoklu Zaman Dilimi Analizi**: 1m, 5m ve 15m grafiklerde eşzamanlı analiz
+- **Hibrit Yapay Zeka Modeli**: LSTM ve RL modellerinin kombinasyonu
+- **Otomatik Risk Yönetimi**: 
+  - Her ticaret için maksimum %1 risk
+  - Maksimum %5 günlük zarar limiti
+  - ATR tabanlı dinamik stop loss
+  - Risk/Ödül oranına dayalı kar alma seviyeleri
+- **MT5 Entegrasyonu**: MetaTrader 5 ile tam entegrasyon
 
-## 📋 Requirements
+## 📋 Gereksinimler
 
 - Python 3.8+
 - MetaTrader 5
-- Required Python libraries (listed in `requirements.txt`)
+- Gerekli Python kütüphaneleri (`requirements.txt` dosyasında listelenmiştir)
 
-## 🛠️ Installation
+## 🛠️ Kurulum
 
-1. Clone the repository:
+1. Depoyu klonlayın:
 ```bash
-git clone https://github.com/username/XAUUSD.git
+git clone https://github.com/AhmetSahinCAKIR/XAUUSD.git
 cd XAUUSD
 ```
 
-2. Create and activate virtual environment:
+2. Sanal ortam oluşturun ve aktifleştirin:
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-.venv\Scripts\activate     # Windows
+.venv\Scripts\activate     # Windows için
+source .venv/bin/activate  # Linux/Mac için
 ```
 
-3. Install required libraries:
+3. Gerekli kütüphaneleri kurun:
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Install MetaTrader 5 and create a demo account.
+4. MetaTrader 5'i kurun ve demo hesabı oluşturun.
 
-## 💻 Usage
+## 💻 Kullanım
 
-1. Start MetaTrader 5 and log in to your account.
+1. MetaTrader 5'i başlatın ve hesabınıza giriş yapın.
 
-2. Run the bot:
+2. config.py dosyasındaki MT5_CONFIG ayarlarını kendi hesap bilgilerinizle güncelleyin:
+```python
+MT5_CONFIG = {
+    'login': HESAP_NUMARANIZ,  
+    'password': 'ŞİFRENİZ',    
+    'server': 'SUNUCU_ADINIZ'  
+}
+```
+
+3. Botu çalıştırın:
 ```bash
 python main.py
 ```
 
-When first started, the bot will:
-- Create necessary models
-- Train models with historical data
-- Then start real-time trading
+İlk başlatıldığında, bot şunları yapacaktır:
+- Gerekli modelleri oluşturma
+- Tarihsel verilerle modelleri eğitme
+- Ardından gerçek zamanlı ticaret başlatma
 
-## ⚙️ Configuration
+## ⚙️ Yapılandırma
 
-Basic parameters can be adjusted in `main.py`:
-- `initial_balance`: Starting balance
-- `risk_per_trade`: Risk percentage per trade
-- `max_daily_loss`: Maximum daily loss percentage
-- `timeframes`: Time periods to analyze
+Temel parametreler `config.py` dosyasında ayarlanabilir:
+- `initial_balance`: Başlangıç bakiyesi
+- `risk_per_trade`: İşlem başına risk yüzdesi
+- `max_daily_loss`: Maksimum günlük zarar yüzdesi
+- `timeframes`: Analiz edilecek zaman dilimleri
 
-## 📊 Performance Monitoring
+## 📊 Performans İzleme
 
-While running, the bot prints:
-- Current balance
-- Daily profit/loss
-- Opened trades
-- Model predictions
-and other information to the console.
+Çalışırken, bot şunları yazdırır:
+- Mevcut bakiye
+- Günlük kar/zarar
+- Açılan işlemler
+- Model tahminleri
+ve diğer bilgiler konsola.
 
-## ⚠️ Risk Warning
+## 🔍 Hata Giderme
 
-This bot is experimental and does not constitute financial advice. Before using on a real account:
-- Test extensively on a demo account
-- Carefully adjust risk management parameters
-- Continuously monitor market conditions
+Bot çalışmazsa şunları kontrol edin:
+1. MetaTrader 5 terminalinin açık olduğundan emin olun
+2. Doğru hesap bilgilerinin `config.py` dosyasında olduğunu doğrulayın
+3. Piyasa saatlerinde çalıştırdığınızdan emin olun (hafta sonu çalışmaz)
+4. MT5 terminalinde "Araçlar > Seçenekler > Uzman Danışmanlar" menüsünden API izinlerini etkinleştirin
 
-## 📝 License
+## ⚠️ Risk Uyarısı
 
-This project is licensed under the MIT License. See the `LICENSE` file for details. 
+Bu bot deneyseldir ve finansal tavsiye teşkil etmez. Gerçek hesapta kullanmadan önce:
+- Bir demo hesabında kapsamlı bir şekilde test edin
+- Risk yönetimi parametrelerini dikkatle ayarlayın
+- Piyasa koşullarını sürekli olarak izleyin
+
+## 📝 Lisans
+
+Bu proje MIT Lisansı altında lisanslanmıştır. Detaylar için `LICENSE` dosyasına bakın. 

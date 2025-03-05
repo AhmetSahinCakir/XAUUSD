@@ -12,6 +12,10 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
   - ATR tabanlı dinamik stop loss
   - Risk/Ödül oranına dayalı kar alma seviyeleri
 - **MT5 Entegrasyonu**: MetaTrader 5 ile tam entegrasyon
+- **Görsel ve Kullanıcı Dostu Arayüz**: 
+  - Emoji ile zenginleştirilmiş durum mesajları
+  - Belirgin çerçeveler içinde önemli bilgiler
+  - İngilizce girdi formatı (y/n)
 
 ## 📋 Gereksinimler
 
@@ -60,9 +64,19 @@ python main.py
 ```
 
 İlk başlatıldığında, bot şunları yapacaktır:
-- Gerekli modelleri oluşturma
-- Tarihsel verilerle modelleri eğitme
-- Ardından gerçek zamanlı ticaret başlatma
+- MT5 bağlantısını kontrol eder ve hesap bilgilerini gösterir
+- Modelleri yüklemeyi dener
+- Eğer model bulunamazsa, size eğitmek isteyip istemediğinizi sorar (y/n)
+  - "y" yanıtı verirseniz, modelleri eğitir (bu işlem zaman alabilir)
+  - "n" yanıtı verirseniz, program sonlanır
+- Modeller hazır olduğunda gerçek zamanlı ticaret başlar
+
+Tüm önemli mesajlar belirgin çerçeveler içinde gösterilir:
+```
+==================================================
+✅ Tüm modeller başarıyla yüklendi.
+==================================================
+```
 
 ## ⚙️ Yapılandırma
 
@@ -75,11 +89,31 @@ Temel parametreler `config.py` dosyasında ayarlanabilir:
 ## 📊 Performans İzleme
 
 Çalışırken, bot şunları yazdırır:
-- Mevcut bakiye
+- Mevcut bakiye ve durum
 - Günlük kar/zarar
 - Açılan işlemler
 - Model tahminleri
-ve diğer bilgiler konsola.
+- Teknik gösterge değerleri
+
+Tüm log kayıtları `trading_bot.log` dosyasına yazılır, böylece konsol çıktısı daha temiz ve anlaşılır kalır.
+
+## 🔄 Güncellemeler
+
+### Mart 2025 Güncellemesi
+
+- **Kullanıcı Arayüzü İyileştirmeleri**:
+  - Emojilerle zenginleştirilmiş mesajlar (✅ ⚠️ ❌ ℹ️)
+  - Belirgin çerçeveler içinde önemli bilgiler
+  - Daha temiz ve organize konsol çıktısı
+
+- **Teknik İyileştirmeler**:
+  - Log mesajlarının dosyaya yönlendirilmesi
+  - "y/n" formatında İngilizce kullanıcı girişleri
+  - MT5 bağlantı kontrolü iyileştirmeleri
+  - Model yükleme ve eğitim sürecinde geliştirmeler
+  - Teknik göstergelerdeki NaN değerlerini temizleme iyileştirmeleri
+  - ATR hesaplama geliştirmeleri (sıfır ATR değerlerinin yönetimi)
+  - Bellek kullanımı optimizasyonları
 
 ## 🔍 Hata Giderme
 
@@ -88,6 +122,7 @@ Bot çalışmazsa şunları kontrol edin:
 2. Doğru hesap bilgilerinin `config.py` dosyasında olduğunu doğrulayın
 3. Piyasa saatlerinde çalıştırdığınızdan emin olun (hafta sonu çalışmaz)
 4. MT5 terminalinde "Araçlar > Seçenekler > Uzman Danışmanlar" menüsünden API izinlerini etkinleştirin
+5. `trading_bot.log` dosyasını inceleyerek detaylı hata mesajlarını görün
 
 ## ⚠️ Risk Uyarısı
 

@@ -194,7 +194,7 @@ class MT5Connector:
                 'high': 'high',
                 'low': 'low',
                 'close': 'close',
-                'tick_volume': 'volume'
+                'tick_volume': 'tick_volume'
             }, inplace=True)
             
             # Zaman sütununu datetime'a dönüştür

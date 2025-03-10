@@ -2,6 +2,8 @@ import time
 from utils.mt5_connector import MT5Connector
 from utils.data_processor import DataProcessor
 from utils.risk_manager import RiskManager
+from utils.market_hours import MarketHours
+from utils.system_monitor import SystemMonitor
 from models.lstm_model import LSTMPredictor
 from models.rl_model import ForexTradingEnv, RLTrader
 import torch
@@ -17,6 +19,7 @@ import gc  # Garbage Collector
 import traceback  # Hata ayıklama için traceback modülünü ekle
 import signal
 import configparser
+import sys
 
 # Loglama konfigürasyonunu uygula
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -49,6 +52,12 @@ class XAUUSDTradingBot:
         # Setup data processor
         self.data_processor = None
         
+        # Setup market hours checker
+        self.market_hours = None
+        
+        # Setup system monitor
+        self.system_monitor = None
+        
         # Model instances
         self.lstm_model = None
         self.lstm_models = {}  # Dictionary to store LSTM models for each timeframe
@@ -67,6 +76,9 @@ class XAUUSDTradingBot:
         self.retrain_models = False
         self.clear_existing_models = False
         
+        # Bot durumu
+        self.is_running = False
+        
         # Initialize everything
         self.initialize()
         
@@ -79,7 +91,6 @@ class XAUUSDTradingBot:
             logger.info("Initializing XAUUSD Trading Bot...")
             
             # Connect to MT5
-            # MT5 bağlantısını kontrol et - eğer zaten bağlıysa tekrar bağlanma
             if hasattr(self, 'mt5') and self.mt5 is not None and hasattr(self.mt5, 'connected') and self.mt5.connected:
                 print("MT5 zaten bağlı!")
             else:
@@ -89,6 +100,12 @@ class XAUUSDTradingBot:
                 self.mt5 = MT5Connector()
                 if not self.mt5.connect():
                     raise ConnectionError("Could not connect to MT5. Please check if MT5 is running.")
+            
+            # Initialize SystemMonitor
+            self.system_monitor = SystemMonitor(
+                mt5_connector=self.mt5,
+                emergency_callback=self.handle_emergency
+            )
             
             # Show account info
             account_info = self.mt5.get_account_info()
@@ -112,7 +129,7 @@ class XAUUSDTradingBot:
                     print(f"Maksimum lot: {symbol_info.volume_max}")
                     print(f"Lot adımı: {symbol_info.volume_step}")
                 print("==================================================")
-                
+            
             # Initialize Data Processor
             self.data_processor = DataProcessor()
             
@@ -143,6 +160,9 @@ class XAUUSDTradingBot:
             self.load_or_create_models(retrain=self.retrain_models, clean_start=self.clear_existing_models)
                 
             print("Modeller başarıyla yüklendi.")
+            
+            # MarketHours nesnesini başlat
+            self.market_hours = MarketHours()
             
         except Exception as e:
             logger.error(f"Initialization error: {str(e)}")
@@ -630,6 +650,12 @@ class XAUUSDTradingBot:
         try:
             print(f"\n====== TİCARET YÜRÜTME BAŞLANGIÇ ({timeframe}) ======")
             
+            # Piyasa açık mı kontrol et
+            if not self.market_hours.is_market_open():
+                logger.info("Piyasa kapalı, işlem yapılmıyor")
+                print("Piyasa kapalı, işlem yapılmıyor")
+                return
+            
             # MT5 bağlantısını kontrol et
             if not self.mt5.connected:
                 logger.error("MT5 bağlantısı yok")
@@ -749,6 +775,9 @@ class XAUUSDTradingBot:
         print("==============================")
         logger.info("Starting XAUUSD Trading Bot")
         
+        # Bot durumunu güncelle
+        self.is_running = True
+        
         # RL model kontrolü
         if self.rl_trader is None:
             print("\nUYARI: RL modeli bulunamadı veya düzgün yüklenemedi!")
@@ -756,17 +785,35 @@ class XAUUSDTradingBot:
             print("Daha iyi sonuçlar için, bot'u durdurup modelleri yeniden eğitebilirsiniz.")
             logger.warning("RL model is not initialized, running with LSTM only")
         
-        # Memory usage monitoring variables
-        last_gc_time = time.time()
-        gc_interval = 600  # Run garbage collection every 10 minutes
-        
         try:
-            while True:
+            while self.is_running:
+                # Sistem durumunu kontrol et
+                self.system_monitor.check()
+                system_stats = self.system_monitor.get_system_stats()
+                
+                # Kritik durum kontrolü
+                if system_stats['memory_usage'] > 85:  # %85'den fazla bellek kullanımı
+                    logger.warning(f"Yüksek bellek kullanımı: {system_stats['memory_usage']:.1f}%")
+                    gc.collect()  # Garbage collection'ı zorla
+                
                 if not self.mt5.connect():
                     logger.error("MT5 connection failed, retrying...")
                     print("MT5 connection failed, retrying...")
                     time.sleep(60)
                     continue
+                
+                # Piyasa durumunu kontrol et
+                if not self.market_hours.is_market_open():
+                    logger.info("Piyasa kapalı, bekleniyor...")
+                    print("Piyasa kapalı, bekleniyor...")
+                    time.sleep(300)  # 5 dakika bekle
+                    continue
+                
+                # Aktif seansları kontrol et
+                active_sessions = self.market_hours.get_current_sessions()
+                if active_sessions:
+                    logger.info(f"Aktif seanslar: {', '.join(active_sessions)}")
+                    print(f"Aktif seanslar: {', '.join(active_sessions)}")
                 
                 current_time = time.strftime('%Y-%m-%d %H:%M:%S')
                 print(f"\n[{current_time}]")
@@ -795,15 +842,6 @@ class XAUUSDTradingBot:
                     self.risk_manager.reset_daily_stats()
                     logger.info("Daily statistics reset")
                     print("Daily statistics reset")
-                    
-                # Memory management - run garbage collection periodically
-                if time.time() - last_gc_time > gc_interval:
-                    logger.info("Running memory cleanup")
-                    gc.collect()  # Force garbage collection
-                    last_gc_time = time.time()
-                    mem_info = f"Memory usage: {self.get_memory_usage():.2f} MB"
-                    logger.info(mem_info)
-                    print(f"Memory cleanup completed. {mem_info}")
                     
                 # Wait before next iteration
                 logger.info("Waiting for next cycle")
@@ -1109,67 +1147,140 @@ class XAUUSDTradingBot:
             logger.error(f"Error saving model: {str(e)}")
             return None
 
-def check_data_sizes(mt5_connector):
-    """
-    Checks and compares data sizes for different timeframes
-    """
-    # Test candle counts
-    candle_counts = {
-        "1m": [2000, 10000, 20000],
-        "5m": [1000, 5000, 10000],
-        "15m": [500, 2000, 5000]
-    }
-    
-    results = {}
-    
-    print("\n=== Data Size Check ===")
-    print("--------------------------------")
-    
-    for timeframe in candle_counts.keys():
-        print(f"\n{timeframe} Timeframe Results:")
-        print("--------------------------------")
-        results[timeframe] = {}
-        
-        for num_candles in candle_counts[timeframe]:
-            data = mt5_connector.get_historical_data("XAUUSD", timeframe, num_candles=num_candles)
+    def handle_emergency(self):
+        """Acil durum yönetimi"""
+        try:
+            logger.error("ACİL DURUM: Sistem kritik bir durumla karşılaştı!")
+            print("\n==================================================")
+            print("⚠️ ACİL DURUM!")
+            print("Bot güvenli bir şekilde kapatılıyor...")
+            print("==================================================")
             
-            if data is not None:
-                actual_size = len(data)
-                coverage = (actual_size / num_candles) * 100
-                memory_usage = data.memory_usage(deep=True).sum() / 1024 / 1024  # In MB
-                
-                results[timeframe][num_candles] = {
-                    "requested_candles": num_candles,
-                    "received_candles": actual_size,
-                    "coverage_ratio": coverage,
-                    "memory_usage": memory_usage
-                }
-                
-                print(f"\nRequested Candles: {num_candles}")
-                print(f"Received Candles: {actual_size}")
-                print(f"Coverage Ratio: {coverage:.2f}%")
-                print(f"Memory Usage: {memory_usage:.2f} MB")
-            else:
-                print(f"\nRequested Candles: {num_candles}")
-                print("Could not retrieve data!")
-    
-    return results
+            emergency_start_time = datetime.now()
+            
+            # Sistem durumunu logla
+            if self.system_monitor:
+                stats = self.system_monitor.get_system_stats()
+                logger.error(f"Sistem durumu: {stats}")
+            
+            # Açık pozisyonları kontrol et ve kapat
+            if self.mt5 and self.mt5.connected:
+                try:
+                    # Açık pozisyonları al
+                    positions = self.mt5.get_open_positions()
+                    if positions:
+                        print(f"{len(positions)} açık pozisyon kapatılıyor...")
+                        logger.warning(f"{len(positions)} açık pozisyon tespit edildi, kapatılıyor...")
+                        
+                        for pos in positions:
+                            try:
+                                # Pozisyonu kapat
+                                result = self.mt5.close_position(pos.ticket)
+                                
+                                if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+                                    # Risk yöneticisini güncelle
+                                    if self.risk_manager:
+                                        pnl = result.profit
+                                        self.risk_manager.update_balance(pnl)
+                                        logger.info(f"Pozisyon kapatıldı: Ticket {pos.ticket}, P/L: ${pnl:.2f}")
+                                else:
+                                    error_msg = f"Pozisyon kapatılamadı: Ticket {pos.ticket}"
+                                    if result:
+                                        error_msg += f", Hata: {result.comment}"
+                                    logger.error(error_msg)
+                                    print(error_msg)
+                                    
+                            except Exception as e:
+                                logger.error(f"Pozisyon kapatma hatası (Ticket {pos.ticket}): {str(e)}")
+                                continue
+                except Exception as e:
+                    logger.error(f"Açık pozisyonları alma hatası: {str(e)}")
+            
+            # Risk yöneticisi durumunu kaydet
+            if self.risk_manager:
+                logger.info(f"Son risk durumu - Günlük P/L: ${self.risk_manager.daily_pnl:.2f}")
+            
+            # Bağlantıyı kapat
+            if self.mt5:
+                self.mt5.disconnect()
+                logger.info("MT5 bağlantısı güvenli bir şekilde kapatıldı")
+            
+            # İşlem süresini hesapla
+            emergency_duration = (datetime.now() - emergency_start_time).total_seconds()
+            logger.error(f"Bot acil durum nedeniyle kapatıldı! (İşlem süresi: {emergency_duration:.2f} saniye)")
+            print("\n==================================================")
+            print("✅ Tüm işlemler güvenli bir şekilde sonlandırıldı.")
+            print("==================================================")
+            
+            # Programı sonlandır
+            os._exit(1)
+            
+        except Exception as e:
+            logger.critical(f"Acil durum yönetimi sırasında kritik hata: {str(e)}")
+            logger.critical(traceback.format_exc())
+            print("\n==================================================")
+            print(f"❌ Acil durum yönetimi başarısız: {str(e)}")
+            print("==================================================")
+            os._exit(1)
 
-def display_status(data_dict):
-    """Displays a simple status of the data"""
-    print("\n=== System Status ===")
-    print("MT5 Connection: ✓")
-    print("\nData Overview:")
-    for timeframe, data in data_dict.items():
-        if data is not None:
-            print(f"{timeframe}: {len(data)} candles loaded ✓")
-        else:
-            print(f"{timeframe}: No data ✗")
-    print("==================\n")
+    def stop(self):
+        """Botu güvenli bir şekilde durdur"""
+        try:
+            logger.info("Bot durduruluyor...")
+            print("\n==================================================")
+            print("Bot durduruluyor, lütfen bekleyin...")
+            print("==================================================")
+            
+            # Bot durumunu güncelle
+            self.is_running = False
+            
+            # Açık pozisyonları kontrol et
+            if self.mt5 and self.mt5.connected:
+                positions = self.mt5.get_open_positions()
+                if positions:
+                    print(f"\n{len(positions)} açık pozisyon bulundu.")
+                    user_input = input("Açık pozisyonları kapatmak istiyor musunuz? (y/n): ").strip().lower()
+                    
+                    if user_input == 'y':
+                        print("\nPozisyonlar kapatılıyor...")
+                        for pos in positions:
+                            try:
+                                result = self.mt5.close_position(pos.ticket)
+                                if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+                                    if self.risk_manager:
+                                        self.risk_manager.update_balance(result.profit)
+                                    print(f"Pozisyon kapatıldı: Ticket {pos.ticket}, P/L: ${result.profit:.2f}")
+                            except Exception as e:
+                                logger.error(f"Pozisyon kapatma hatası (Ticket {pos.ticket}): {str(e)}")
+                                print(f"Hata: Pozisyon kapatılamadı (Ticket {pos.ticket})")
+            
+            # Bağlantıyı kapat
+            if self.mt5:
+                self.mt5.disconnect()
+                logger.info("MT5 bağlantısı kapatıldı")
+            
+            print("\n==================================================")
+            print("✅ Bot güvenli bir şekilde durduruldu.")
+            print("==================================================")
+            
+        except Exception as e:
+            logger.error(f"Bot durdurulurken hata: {str(e)}")
+            print(f"\nHata: Bot durdurulurken bir sorun oluştu: {str(e)}")
+
+def signal_handler(signum, frame):
+    """Sinyal yöneticisi"""
+    print("\nKapatma sinyali alındı. Bot güvenli bir şekilde kapatılacak...")
+    if 'bot' in globals():
+        bot.stop()
+    sys.exit(0)
 
 def main():
     """Ana program"""
     try:
+        # Sinyal yöneticilerini ayarla
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
         print("\n====== ALTIN TİCARET BOTUNA HOŞGELDİNİZ ======")
         print("Bot başlatılıyor...")
 
@@ -1290,29 +1401,16 @@ def main():
         bot.run()
         
     except KeyboardInterrupt:
-        print("\n\n==================================================")
-        print("⚠️ Bot kullanıcı tarafından durduruldu.")
-        print("==================================================")
+        print("\nBot kullanıcı tarafından durduruldu.")
+        if 'bot' in locals():
+            bot.stop()
     except Exception as e:
-        print("\n\n==================================================")
-        print(f"❌ Bot çalışırken beklenmeyen hata: {str(e)}")
-        print("==================================================")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Kritik hata: {str(e)}")
+        print(f"\nKritik hata oluştu: {str(e)}")
+        if 'bot' in locals():
+            bot.stop()
     finally:
-        # MT5 bağlantısını kapat
-        try:
-            if 'mt5_connector' in locals() and mt5_connector.connected:
-                mt5_connector.disconnect()
-                print("\n==================================================")
-                print("ℹ️ MT5 bağlantısı kapatıldı.")
-                print("==================================================")
-        except:
-            pass
-        
-        print("\n==================================================")
-        print("ℹ️ BOT SONLANDIRILDI")
-        print("==================================================")
+        print("\nProgram sonlandırıldı.")
 
 if __name__ == "__main__":
     main() 

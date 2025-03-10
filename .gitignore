@@ -1,3 +1,6 @@
+# Environment variables
+.env
+
 # Python
 __pycache__/
 *.py[cod]
@@ -21,9 +24,7 @@ wheels/
 *.egg
 
 # Virtual Environment
-.env
-.venv
-env/
+.venv/
 venv/
 ENV/
 
@@ -32,28 +33,50 @@ ENV/
 .vscode/
 *.swp
 *.swo
+.project
+.pydevproject
+
+# Logs
+logs/
+*.log
+trading_bot.log
+error.log
+
+# Model files
+saved_models/
+*.pth
+*.h5
+*.pkl
+
+# Data files
+data/*.csv
+data/*.json
+!data/market_holidays.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
 .DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.swp
+
+# Documentation
+docs/_build/
+docs/_static/
+docs/_templates/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Performance profiling
+*.prof
+*.stats
 
 # Unit test / coverage reports
 htmlcov/
@@ -66,13 +89,7 @@ coverage.xml
 *.cover
 .hypothesis/
 
-# Logs
-*.log
-logs/
-log/
-
 # Local development settings
-.env
 .env.local
 .env.*.local
 
@@ -97,15 +114,12 @@ symbols.sel
 #poetry.lock
 
 # MT5 Trading Bot specific
-logs/
-saved_models/
 .venv/
 .vs/
 .vscode/
 *.pth
 *.zip
 *.pickle
-*.h5
 *.model
 test_*.py
 debug_*.py

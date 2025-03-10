@@ -4,18 +4,30 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
 
 ## 🚀 Özellikler
 
-- **Çoklu Zaman Dilimi Analizi**: 1m, 5m ve 15m grafiklerde eşzamanlı analiz
-- **Hibrit Yapay Zeka Modeli**: LSTM ve RL modellerinin kombinasyonu
-- **Otomatik Risk Yönetimi**: 
+- **Çoklu Zaman Dilimi Analizi**: 5m, 15m ve 1h grafiklerde eşzamanlı analiz
+- **Hibrit Yapay Zeka Modeli**: 
+  - LSTM ve RL modellerinin kombinasyonu
+  - 32 farklı özellik kullanımı
+  - Optimize edilmiş model parametreleri
+- **Gelişmiş Risk Yönetimi**: 
   - Her ticaret için maksimum %1 risk
   - Maksimum %5 günlük zarar limiti
-  - ATR tabanlı dinamik stop loss
-  - Risk/Ödül oranına dayalı kar alma seviyeleri
-- **MT5 Entegrasyonu**: MetaTrader 5 ile tam entegrasyon
-- **Görsel ve Kullanıcı Dostu Arayüz**: 
+  - Maksimum %15 toplam zarar limiti
+  - ATR tabanlı dinamik trailing stop
+  - Çoklu seviyeli kar alma stratejisi (1.5R, 2R, 3R)
+- **MT5 Entegrasyonu**: 
+  - Tam MetaTrader 5 entegrasyonu
+  - Otomatik yeniden bağlanma
+  - Güvenli bağlantı yönetimi
+- **Sistem İzleme ve Güvenlik**:
+  - Bellek ve CPU kullanımı optimizasyonu
+  - Otomatik garbage collection
+  - Hassas veri filtreleme
+  - Detaylı loglama sistemi
+- **Bildirim Sistemi**:
+  - Telegram entegrasyonu (isteğe bağlı)
   - Emoji ile zenginleştirilmiş durum mesajları
-  - Belirgin çerçeveler içinde önemli bilgiler
-  - İngilizce girdi formatı (y/n)
+  - Kritik durum uyarıları
 
 ## 📋 Gereksinimler
 
@@ -43,93 +55,84 @@ source .venv/bin/activate  # Linux/Mac için
 pip install -r requirements.txt
 ```
 
-4. MetaTrader 5'i kurun ve demo hesabı oluşturun.
+4. Yapılandırma dosyasını hazırlayın:
+```bash
+copy .env.example .env    # Windows için
+cp .env.example .env     # Linux/Mac için
+```
+
+5. `.env` dosyasını düzenleyin:
+   - MT5_LOGIN: MetaTrader 5 hesap numaranız
+   - MT5_PASSWORD: MetaTrader 5 şifreniz
+   - MT5_SERVER: Broker sunucu adı
+   - Diğer parametreleri isteğe bağlı olarak ayarlayın
+
+6. Gerekli dizinleri oluşturun:
+```bash
+mkdir -p logs data saved_models
+```
 
 ## 💻 Kullanım
 
 1. MetaTrader 5'i başlatın ve hesabınıza giriş yapın.
 
-2. config.py dosyasındaki MT5_CONFIG ayarlarını kendi hesap bilgilerinizle güncelleyin:
-```python
-MT5_CONFIG = {
-    'login': HESAP_NUMARANIZ,  
-    'password': 'ŞİFRENİZ',    
-    'server': 'SUNUCU_ADINIZ'  
-}
-```
-
-3. Botu çalıştırın:
+2. Botu çalıştırın:
 ```bash
 python main.py
 ```
 
-İlk başlatıldığında, bot şunları yapacaktır:
-- MT5 bağlantısını kontrol eder ve hesap bilgilerini gösterir
-- Modelleri yüklemeyi dener
-- Eğer model bulunamazsa, size eğitmek isteyip istemediğinizi sorar (y/n)
-  - "y" yanıtı verirseniz, modelleri eğitir (bu işlem zaman alabilir)
-  - "n" yanıtı verirseniz, program sonlanır
-- Modeller hazır olduğunda gerçek zamanlı ticaret başlar
-
-Tüm önemli mesajlar belirgin çerçeveler içinde gösterilir:
-```
-==================================================
-✅ Tüm modeller başarıyla yüklendi.
-==================================================
-```
+Bot başlatıldığında:
+- MT5 bağlantısını kontrol eder
+- Sistem kaynaklarını izlemeye başlar
+- Modelleri yükler veya eğitir
+- Gerçek zamanlı trading başlar
 
 ## ⚙️ Yapılandırma
 
-Temel parametreler `config.py` dosyasında ayarlanabilir:
-- `initial_balance`: Başlangıç bakiyesi
-- `risk_per_trade`: İşlem başına risk yüzdesi
-- `max_daily_loss`: Maksimum günlük zarar yüzdesi
-- `timeframes`: Analiz edilecek zaman dilimleri
+Temel parametreler `.env` dosyasında ayarlanabilir:
+- Risk yönetimi parametreleri
+- Bağlantı bilgileri
+- Bildirim ayarları
 
-## 📊 Performans İzleme
+Gelişmiş parametreler `config.py` dosyasında bulunur:
+- Model parametreleri
+- Trading stratejisi ayarları
+- Sistem yapılandırması
+- Loglama ayarları
 
-Çalışırken, bot şunları yazdırır:
-- Mevcut bakiye ve durum
-- Günlük kar/zarar
-- Açılan işlemler
-- Model tahminleri
-- Teknik gösterge değerleri
+## 📊 İzleme ve Raporlama
 
-Tüm log kayıtları `trading_bot.log` dosyasına yazılır, böylece konsol çıktısı daha temiz ve anlaşılır kalır.
+Bot çalışırken:
+- Anlık durum bilgileri konsola yazdırılır
+- Detaylı loglar `logs/` dizinine kaydedilir
+- Sistem durumu sürekli izlenir
+- İsteğe bağlı Telegram bildirimleri gönderilir
 
-## 🔄 Güncellemeler
+Log dosyaları:
+- `logs/trading_bot.log`: Genel işlem logları
+- `logs/error.log`: Hata logları
 
-### Mart 2025 Güncellemesi
+## 🔄 Otomatik Yeniden Başlatma
 
-- **Kullanıcı Arayüzü İyileştirmeleri**:
-  - Emojilerle zenginleştirilmiş mesajlar (✅ ⚠️ ❌ ℹ️)
-  - Belirgin çerçeveler içinde önemli bilgiler
-  - Daha temiz ve organize konsol çıktısı
-
-- **Teknik İyileştirmeler**:
-  - Log mesajlarının dosyaya yönlendirilmesi
-  - "y/n" formatında İngilizce kullanıcı girişleri
-  - MT5 bağlantı kontrolü iyileştirmeleri
-  - Model yükleme ve eğitim sürecinde geliştirmeler
-  - Teknik göstergelerdeki NaN değerlerini temizleme iyileştirmeleri
-  - ATR hesaplama geliştirmeleri (sıfır ATR değerlerinin yönetimi)
-  - Bellek kullanımı optimizasyonları
-
-## 🔍 Hata Giderme
-
-Bot çalışmazsa şunları kontrol edin:
-1. MetaTrader 5 terminalinin açık olduğundan emin olun
-2. Doğru hesap bilgilerinin `config.py` dosyasında olduğunu doğrulayın
-3. Piyasa saatlerinde çalıştırdığınızdan emin olun (hafta sonu çalışmaz)
-4. MT5 terminalinde "Araçlar > Seçenekler > Uzman Danışmanlar" menüsünden API izinlerini etkinleştirin
-5. `trading_bot.log` dosyasını inceleyerek detaylı hata mesajlarını görün
+Bot şu durumlarda otomatik olarak yeniden bağlanır:
+- MT5 bağlantısı koptuğunda
+- Bellek kullanımı yükseldiğinde
+- Kritik hatalar oluştuğunda
 
 ## ⚠️ Risk Uyarısı
 
 Bu bot deneyseldir ve finansal tavsiye teşkil etmez. Gerçek hesapta kullanmadan önce:
-- Bir demo hesabında kapsamlı bir şekilde test edin
-- Risk yönetimi parametrelerini dikkatle ayarlayın
-- Piyasa koşullarını sürekli olarak izleyin
+- Demo hesapta kapsamlı testler yapın
+- Risk parametrelerini dikkatle ayarlayın
+- Piyasa koşullarını sürekli izleyin
+
+## 🔍 Hata Ayıklama
+
+Sorun yaşarsanız:
+1. Log dosyalarını kontrol edin
+2. MT5 bağlantısını doğrulayın
+3. `.env` dosyasındaki bilgileri kontrol edin
+4. Sistem kaynaklarının yeterli olduğundan emin olun
 
 ## 📝 Lisans
 

@@ -269,7 +269,6 @@ class DataProcessor:
                     if not gaps.empty:
                         logger.warning(f"Veri setinde {len(gaps)} adet piyasa boşluğu (gap) tespit edildi")
                         logger.warning(f"En büyük boşluk: {gaps['time_diff'].max()} dakika")
-                        logger.warning(f"Boşlukların olduğu tarihler: {gaps['time'].tolist()}")
                 
                 # Geçici sütunu kaldır
                 if 'time_diff' in df.columns:

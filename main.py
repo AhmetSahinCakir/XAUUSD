@@ -18,8 +18,9 @@ import json
 import gc  # Garbage Collector
 import traceback  # Hata ayıklama için traceback modülünü ekle
 import signal
-import configparser
 import sys
+import MetaTrader5 as mt5  # MetaTrader5 modülünü import et
+import concurrent.futures
 
 # Loglama konfigürasyonunu uygula
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -157,12 +158,26 @@ class XAUUSDTradingBot:
                     print("==================================================")
             
             # Load or create models
-            self.load_or_create_models(retrain=self.retrain_models, clean_start=self.clear_existing_models)
+            models_loaded = self.load_or_create_models(retrain=self.retrain_models, clean_start=self.clear_existing_models)
                 
-            print("Modeller başarıyla yüklendi.")
+            if models_loaded:
+                print("Modeller başarıyla yüklendi.")
             
             # MarketHours nesnesini başlat
             self.market_hours = MarketHours()
+            
+            # Initialize RL Trader
+            if not hasattr(self, 'rl_trader') or self.rl_trader is None:
+                try:
+                    self.rl_trader = RLTrader(
+                        state_size=len(self.data_processor.get_feature_names()),
+                        action_size=3,  # Alım, Satım, Bekle
+                        learning_rate=MODEL_CONFIG['rl']['learning_rate']
+                    )
+                    logger.info("RL Trader başarıyla başlatıldı")
+                except Exception as e:
+                    logger.error(f"RL Trader başlatılamadı: {str(e)}")
+                    self.rl_trader = None
             
         except Exception as e:
             logger.error(f"Initialization error: {str(e)}")
@@ -236,224 +251,65 @@ class XAUUSDTradingBot:
         Parametreler:
         - retrain: Modelleri yeniden eğit
         - clean_start: Mevcut modelleri sil ve sıfırdan başla
-        
-        Dönüş:
-        - bool: Modeller yüklendiyse True, yüklenemediyse ve eğitim gerekiyorsa False
         """
         try:
             # Model dizinini oluştur
             os.makedirs('saved_models', exist_ok=True)
             
-            # Check if we need to retrain
-            if retrain:
-                logger.info("Kullanıcı isteği üzerine modeller yeniden eğitilecek.")
-                # If user wants clean start, delete existing models
-                if clean_start:
-                    logger.info("Mevcut modeller silinecek ve eğitim sıfırdan başlayacak.")
-                    
-                    # Delete existing model files
-                    deleted_count = 0
-                    print("\n==================================================")
-                    print("ℹ️ Mevcut modelleri silme işlemi başlatılıyor...")
-                    for file in os.listdir('saved_models'):
-                        if file.endswith('.pth') or file.endswith('.zip') or file == 'training_metadata.json':
-                            os.remove(os.path.join('saved_models', file))
-                            deleted_count += 1
-                            
-                    # Delete metadata file
-                    if os.path.exists('saved_models/training_metadata.json'):
-                        os.remove('saved_models/training_metadata.json')
-                        
-                    if deleted_count > 0:
-                        print(f"✅ {deleted_count} model dosyası silindi.")
-                    else:
-                        print("ℹ️ Silinecek model dosyası bulunamadı.")
-                    print("==================================================")
-                    
-                    # Sıfırdan modeller oluştur ama eğitme
-                    # Genel LSTM modeli (geriye dönük uyumluluk için)
-                    self.lstm_model = LSTMPredictor(
-                        input_size=MODEL_CONFIG['lstm']['input_size'],
-                        hidden_size=MODEL_CONFIG['lstm']['hidden_size'],
-                        num_layers=MODEL_CONFIG['lstm']['num_layers'],
-                        dropout=MODEL_CONFIG['lstm']['dropout']
-                    )
-                    
-                    # Her zaman dilimi için ayrı LSTM modelleri
-                    for timeframe in self.timeframes:
-                        self.lstm_models[timeframe] = LSTMPredictor(
-                            input_size=MODEL_CONFIG['lstm']['input_size'],
-                            hidden_size=MODEL_CONFIG['lstm']['hidden_size'],
-                            num_layers=MODEL_CONFIG['lstm']['num_layers'],
-                            dropout=MODEL_CONFIG['lstm']['dropout']
-                        )
-                    
-                    self.rl_trader = None
-                    logger.info("Yeni modeller oluşturuldu, eğitim bekliyor.")
-                    
-                    # Eğitim gerektiğini bildir
-                    return False
+            # Eğer temiz başlangıç isteniyorsa, mevcut modelleri sil
+            if clean_start:
+                print("\n==================================================")
+                print("ℹ️ Mevcut modelleri silme işlemi başlatılıyor...")
+                model_files = [f for f in os.listdir('saved_models') if f.endswith('.pth')]
+                if model_files:
+                    for file in model_files:
+                        os.remove(os.path.join('saved_models', file))
+                    print(f"✅ {len(model_files)} model dosyası silindi.")
                 else:
-                    # Retrain existing models
-                    return False
-            
-            # Check for saved models
-            # First check for timeframe-specific models
-            timeframe_models_found = False
-            loaded_models_count = 0
-            
-            # Check if metadata exists
-            if os.path.exists('saved_models/training_metadata.json'):
-                try:
-                    with open('saved_models/training_metadata.json', 'r') as f:
-                        metadata = json.load(f)
-                    
-                    # Check if models section exists
-                    if 'models' in metadata:
-                        # Load models for each timeframe
-                        for timeframe, model_info in metadata['models'].items():
-                            model_path = model_info.get('model_path')
-                            if model_path:
-                                # .pth uzantısını kontrol et ve gerekirse ekle
-                                if not model_path.endswith('.pth'):
-                                    model_path = f"{model_path}.pth"
-                                
-                                full_path = os.path.join('saved_models', model_path)
-                                if os.path.exists(full_path):
-                                    try:
-                                        # Ayrıntılı yükleme mesajını loglara kaydediyoruz, ama konsola ayrıntı verme
-                                        logger.info(f"Loading LSTM model for {timeframe} from {full_path}")
-                                        self.lstm_models[timeframe] = LSTMPredictor.load_model(full_path)
-                                        timeframe_models_found = True
-                                        loaded_models_count += 1
-                                    except Exception as e:
-                                        logger.error(f"Error loading LSTM model for {timeframe}: {str(e)}")
-                                else:
-                                    logger.error(f"Model file not found: {full_path}")
-                except Exception as e:
-                    logger.error(f"Error reading metadata: {str(e)}")
-            
-            # If no timeframe-specific models found, check for legacy models
-            if not timeframe_models_found:
-                logger.info("Zaman dilimi bazlı model bulunamadı, eski model formatı kontrol ediliyor...")
+                    print("ℹ️ Silinecek model dosyası bulunamadı.")
+                print("==================================================")
+
+            # Eğer yeniden eğitim isteniyorsa, direkt eğitime başla
+            if retrain:
+                logger.info("Model eğitimi başlatılıyor...")
+                self.train_models()
+                return True
+
+            # Eğer yeniden eğitim istenmiyorsa, mevcut modelleri yüklemeyi dene
+            models_loaded = False
+            for timeframe in self.timeframes:
+                # Her timeframe için en son kaydedilen modeli bul
+                model_files = [f for f in os.listdir('saved_models') 
+                             if f.startswith(f'lstm_model_{timeframe}') and f.endswith('.pth')]
                 
-                # Check if saved_models directory exists
-                if not os.path.exists('saved_models'):
-                    os.makedirs('saved_models', exist_ok=True)
-                    logger.info("Created saved_models directory")
-                
-                # Check for legacy models
-                try:
-                    lstm_files = [f for f in os.listdir('saved_models') if f.startswith('lstm_model_') and f.endswith('.pth')]
-                    rl_files = [f for f in os.listdir('saved_models') if f.startswith('rl_model_') and f.endswith('.zip')]
-                except Exception as e:
-                    logger.error(f"Error listing model files: {str(e)}")
-                    lstm_files = []
-                    rl_files = []
-                
-                if lstm_files:
-                    # Sort by timestamp (newest first)
-                    lstm_files.sort(reverse=True)
-                    
-                    # Load the newest model
-                    lstm_path = os.path.join('saved_models', lstm_files[0])
+                if model_files:
+                    # En son kaydedilen modeli al (tarih_saat bilgisine göre)
+                    latest_model = sorted(model_files)[-1]
+                    model_path = os.path.join('saved_models', latest_model)
                     
                     try:
-                        # Load LSTM model - loglara ayrıntılı kaydet ama konsola ayrıntı verme
-                        logger.info(f"Loading legacy LSTM model from {lstm_path}")
-                        self.lstm_model = LSTMPredictor.load_model(lstm_path)
-                        
-                        # Also use this model for all timeframes
-                        for timeframe in self.timeframes:
-                            self.lstm_models[timeframe] = self.lstm_model
-                            logger.info(f"Using legacy LSTM model for {timeframe}")
-                            loaded_models_count += 1
-                        
-                        timeframe_models_found = True
+                        self.lstm_models[timeframe] = LSTMPredictor.load_model(model_path)
+                        models_loaded = True
+                        logger.info(f"{timeframe} modeli başarıyla yüklendi: {latest_model}")
                     except Exception as e:
-                        logger.error(f"Error loading legacy LSTM model: {str(e)}")
-                    
-                    # Load RL model if available
-                    if rl_files:
-                        rl_files.sort(reverse=True)
-                        rl_path = os.path.join('saved_models', rl_files[0])
-                        
-                        # Load initial data for RL environment
-                        initial_data_dict = {}
-                        for timeframe, num_candles in DATA_CONFIG['default_candles'].items():
-                            data = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=num_candles)
-                            if data is not None and len(data) >= num_candles * 0.8:
-                                initial_data_dict[timeframe] = data
-                        
-                        # Combine all data
-                        if initial_data_dict:
-                            initial_data = pd.concat(initial_data_dict.values())
-                            
-                            # Set up environment parameters
-                            env_params = {
-                                'df': initial_data,
-                                'lstm_model': self.lstm_model,
-                                'initial_balance': TRADING_CONFIG['initial_balance'],
-                                'max_position_size': 1.0,
-                                'transaction_fee': TRADING_CONFIG['transaction_fee']
-                            }
-                            
-                            # Load RL model
-                            try:
-                                self.rl_trader = RLTrader(lstm_model=self.lstm_model, env_params=env_params)
-                                self.rl_trader.load(rl_path)
-                                logger.info(f"Loaded RL model from {rl_path}")
-                            except Exception as e:
-                                logger.error(f"Error loading RL model: {str(e)}")
-                                self.rl_trader = None
-                
-            # Modellerin durumunu rapor et
-            if loaded_models_count == len(self.timeframes):
-                logger.info("Tüm zaman dilimleri için modeller başarıyla yüklendi")
-                print("\n==================================================")
-                print("✅ Tüm modeller başarıyla yüklendi.")
-                print("==================================================")
-                return True
-            elif loaded_models_count > 0:
-                logger.warning(f"Yalnızca {loaded_models_count}/{len(self.timeframes)} model yüklenebildi")
-                print("\n==================================================")
-                print(f"⚠️ Uyarı: Yalnızca {loaded_models_count}/{len(self.timeframes)} model yüklenebildi.")
-                print("Diğer modeller bulunamadı veya yüklenemedi.")
-                print("==================================================")
-                return True  # Yine de bazı modeller başarıyla yüklendi
-            else:
+                        logger.error(f"{timeframe} modeli yüklenirken hata: {str(e)}")
+
+            if not models_loaded:
                 logger.error("Hiçbir model yüklenemedi!")
-                
-                # Hiçbir model bulunamadıysa, yeni boş modeller oluştur ama eğitme
-                logger.info("No saved models found. Need to create and train new models.")
-                
-                # Ana LSTM modeli
-                self.lstm_model = LSTMPredictor(
-                    input_size=MODEL_CONFIG['lstm']['input_size'],
-                    hidden_size=MODEL_CONFIG['lstm']['hidden_size'],
-                    num_layers=MODEL_CONFIG['lstm']['num_layers'],
-                    dropout=MODEL_CONFIG['lstm']['dropout']
-                )
-                
-                # Her zaman dilimi için LSTM modelleri
-                for timeframe in self.timeframes:
-                    self.lstm_models[timeframe] = LSTMPredictor(
-                        input_size=MODEL_CONFIG['lstm']['input_size'],
-                        hidden_size=MODEL_CONFIG['lstm']['hidden_size'],
-                        num_layers=MODEL_CONFIG['lstm']['num_layers'],
-                        dropout=MODEL_CONFIG['lstm']['dropout']
-                    )
-                    
-                # Eğitim gerektiğini belirt
+                print("\n==================================================")
+                print("⚠️ Model bulunamadı veya yüklenemedi! ⚠️")
+                print("Bot çalışmak için eğitilmiş modellere ihtiyaç duyar.")
+                print("==================================================\n")
+                user_input = input("Modelleri eğitmek ister misiniz? Bu işlem zaman alabilir. (y/n): ")
+                if user_input.lower() == 'y':
+                    self.train_models()
+                    return True
                 return False
-            
+
+            return True
+
         except Exception as e:
-            logger.error(f"Error loading models: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            print("\n==================================================")
-            print(f"❌ Model yükleme hatası: {str(e)}")
-            print("==================================================")
+            logger.error(f"Model yükleme/oluşturma hatası: {str(e)}")
             return False
 
     def train_models(self):
@@ -522,17 +378,40 @@ class XAUUSDTradingBot:
         - rl_action: RL modeli aksiyonu
         """
         try:
-            # Zaman dilimi için son verileri al
+            # Bellek kullanımını kontrol et
+            memory_usage = self.get_memory_usage()
+            if memory_usage > 1024:  # 1GB'dan fazla kullanım varsa
+                logger.warning(f"Yüksek bellek kullanımı: {memory_usage:.1f} MB")
+                gc.collect()  # Garbage collection'ı zorla
+            
             logger.debug(f"{timeframe} zaman dilimi için ticaret sinyalleri üretiliyor...")
             
-            # Son 100 mum verisini al
-            candles = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=100)
+            # Veri doğrulama - 1: Timeframe kontrolü
+            valid_timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', 'D1']
+            if timeframe not in valid_timeframes:
+                logger.error(f"Geçersiz zaman dilimi: {timeframe}")
+                return None, None
             
-            if candles is None or len(candles) < 60:
+            # Son 100 mum verisini al - chunk'lar halinde
+            chunk_size = 50
+            chunks = []
+            
+            for i in range(0, 100, chunk_size):
+                chunk = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=chunk_size, start_pos=i)
+                if chunk is None or len(chunk) == 0:
+                    logger.error(f"Veri chunk'ı alınamadı: {i}-{i+chunk_size}")
+                    return None, None
+                chunks.append(chunk)
+            
+            # Chunk'ları birleştir
+            candles = pd.concat(chunks, ignore_index=True)
+            
+            # Veri doğrulama - 2: Minimum veri kontrolü
+            if len(candles) < 60:
                 logger.warning(f"{timeframe} için yeterli veri yok. En az 60 mum gerekli.")
                 return None, None
             
-            # Veri sütunlarını kontrol et
+            # Veri doğrulama - 3: Sütun kontrolü
             required_columns = ['time', 'open', 'high', 'low', 'close', 'tick_volume']
             missing_columns = [col for col in required_columns if col not in candles.columns]
             
@@ -540,49 +419,65 @@ class XAUUSDTradingBot:
                 logger.warning(f"{timeframe} verisinde eksik sütunlar: {missing_columns}")
                 logger.debug(f"Mevcut sütunlar: {list(candles.columns)}")
                 
-                # tick_volume eksikse ve volume varsa, tick_volume olarak kullan
                 if 'tick_volume' in missing_columns and 'volume' in candles.columns:
                     logger.debug("'volume' sütunu 'tick_volume' olarak kullanılıyor")
                     candles['tick_volume'] = candles['volume']
                     missing_columns.remove('tick_volume')
                 
-                # Hala eksik sütun varsa
                 if missing_columns:
                     logger.error(f"Kritik sütunlar eksik: {missing_columns}")
                     return None, None
             
-            # Teknik göstergeleri ekle
-            try:
-                candles = self.data_processor.add_technical_indicators(candles)
-            except Exception as e:
-                logger.error(f"Teknik göstergeler eklenirken hata: {str(e)}")
-                import traceback
-                logger.error(traceback.format_exc())
-                return None, None
+            # Veri doğrulama - 4: NaN kontrolü
+            nan_columns = candles.columns[candles.isna().any()].tolist()
+            if nan_columns:
+                logger.warning(f"NaN değerler içeren sütunlar: {nan_columns}")
+                # Basit forward fill ile doldur
+                candles = candles.ffill()
             
-            # Fiyat boşluklarını tespit et
-            try:
-                candles = self.data_processor.detect_price_gaps(candles)
-                if candles is None:
-                    logger.error("detect_price_gaps None döndürdü, işlem sonlandırılıyor")
-                    return None, None
-            except Exception as e:
-                logger.debug(f"Fiyat boşlukları tespit edilirken hata: {str(e)}")
-                if candles is not None:
-                    candles['gap'] = 0
-                    candles['gap_size'] = 0
-                else:
-                    logger.error("candles None değeri, işlem sonlandırılıyor")
-                    return None, None
+            # Veri doğrulama - 5: Aykırı değer kontrolü
+            for col in ['open', 'high', 'low', 'close']:
+                mean = candles[col].mean()
+                std = candles[col].std()
+                outliers = candles[col][(candles[col] < mean - 3*std) | (candles[col] > mean + 3*std)]
+                if not outliers.empty:
+                    logger.warning(f"Aykırı değerler bulundu - {col}: {len(outliers)} adet")
             
-            # Seans bilgilerini ekle
-            try:
-                candles = self.data_processor.add_session_info(candles)
-            except Exception as e:
-                logger.debug(f"Seans bilgileri eklenirken hata: {str(e)}")
-                candles['session_asia'] = 0
-                candles['session_europe'] = 0
-                candles['session_us'] = 0
+            # Teknik göstergeleri paralel olarak hesapla
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future_technicals = executor.submit(self.data_processor.add_technical_indicators, candles.copy())
+                future_gaps = executor.submit(self.data_processor.detect_price_gaps, candles.copy())
+                future_sessions = executor.submit(self.data_processor.add_session_info, candles.copy())
+                
+                try:
+                    candles = future_technicals.result()
+                    if candles is None:
+                        logger.error("Teknik göstergeler hesaplanamadı")
+                        return None, None
+                        
+                    # Gap ve seans bilgilerini birleştir
+                    gap_data = future_gaps.result()
+                    session_data = future_sessions.result()
+                    
+                    if gap_data is not None:
+                        candles['gap'] = gap_data['gap']
+                        candles['gap_size'] = gap_data['gap_size']
+                    else:
+                        candles['gap'] = 0
+                        candles['gap_size'] = 0
+                        
+                    if session_data is not None:
+                        candles['session_asia'] = session_data['session_asia']
+                        candles['session_europe'] = session_data['session_europe']
+                        candles['session_us'] = session_data['session_us']
+                    else:
+                        candles['session_asia'] = 0
+                        candles['session_europe'] = 0
+                        candles['session_us'] = 0
+                        
+                except Exception as e:
+                    logger.error(f"Paralel işlem hatası: {str(e)}")
+                    return None, None
             
             # LSTM tahmini için veriyi hazırla
             try:
@@ -591,21 +486,42 @@ class XAUUSDTradingBot:
                     logger.error("LSTM tahmini için hazırlanan veri boş veya None")
                     return None, None
                 
-                lstm_data = self.data_processor.prepare_prediction_data(candles)
+                # Veri hazırlama işlemini chunk'lara böl
+                chunk_size = 1000
+                num_chunks = (len(candles) + chunk_size - 1) // chunk_size
+                prepared_chunks = []
                 
-                # None kontrolü
-                if lstm_data is None:
-                    logger.error("prepare_prediction_data None döndürdü")
+                for i in range(num_chunks):
+                    start_idx = i * chunk_size
+                    end_idx = min((i + 1) * chunk_size, len(candles))
+                    chunk = candles.iloc[start_idx:end_idx]
+                    prepared_chunk = self.data_processor.prepare_prediction_data(chunk)
+                    if prepared_chunk is not None:
+                        prepared_chunks.append(prepared_chunk)
+                
+                if not prepared_chunks:
+                    logger.error("Hiçbir veri chunk'ı hazırlanamadı")
                     return None, None
                 
+                lstm_data = torch.cat(prepared_chunks, dim=0)
+                
                 # LSTM modelini kullanarak tahmin yap
-                lstm_model = self.lstm_models.get(f"lstm_{timeframe}")
+                lstm_model = self.lstm_models.get(timeframe)
                 if lstm_model is None:
                     logger.warning(f"{timeframe} için LSTM modeli bulunamadı")
                     return None, None
                 
-                lstm_prediction = lstm_model.forward(lstm_data)
-                lstm_prediction = lstm_prediction.item()
+                # Batch'ler halinde tahmin yap
+                batch_size = 32
+                predictions = []
+                
+                for i in range(0, len(lstm_data), batch_size):
+                    batch = lstm_data[i:i+batch_size]
+                    with torch.no_grad():
+                        pred = lstm_model.forward(batch)
+                        predictions.append(pred)
+                
+                lstm_prediction = torch.cat(predictions, dim=0).mean().item()
                 
                 # Tahmin edilen değeri orijinal ölçeğe dönüştür
                 lstm_prediction = self.data_processor.inverse_transform_price(lstm_prediction)
@@ -619,8 +535,10 @@ class XAUUSDTradingBot:
                 
                 logger.info(f"{timeframe} LSTM Tahmini: {lstm_prediction:.2f} ({direction}, %{change_pct:.2f})")
                 
-                # RL durumunu hazırla
-                rl_state = self.data_processor.prepare_rl_state(candles)
+                # RL durumunu hazırla - paralel işlem
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future_rl = executor.submit(self.data_processor.prepare_rl_state, candles)
+                    rl_state = future_rl.result()
                 
                 # RL modelini kullanarak aksiyon al
                 rl_model = self.rl_trader
@@ -630,6 +548,10 @@ class XAUUSDTradingBot:
                 else:
                     rl_action = rl_model.predict(rl_state)
                     logger.info(f"{timeframe} RL Aksiyonu: {rl_action}")
+                
+                # Belleği temizle
+                del candles, lstm_data, predictions
+                gc.collect()
                 
                 return lstm_prediction, rl_action
                 
@@ -1008,9 +930,9 @@ class XAUUSDTradingBot:
             
             # Model parametrelerini al
             input_size = train_seq.shape[2]
-            hidden_size = self.config['MODEL']['hidden_size']
-            num_layers = self.config['MODEL']['num_layers']
-            dropout = self.config['MODEL']['dropout']
+            hidden_size = self.config['MODEL']['lstm']['hidden_size']
+            num_layers = self.config['MODEL']['lstm']['num_layers']
+            dropout = self.config['MODEL']['lstm']['dropout']
             learning_rate = self.config['MODEL']['learning_rate']
             batch_size = self.config['MODEL']['batch_size']
             epochs = self.config['MODEL']['epochs']
@@ -1270,12 +1192,19 @@ class XAUUSDTradingBot:
 def signal_handler(signum, frame):
     """Sinyal yöneticisi"""
     print("\nKapatma sinyali alındı. Bot güvenli bir şekilde kapatılacak...")
-    if 'bot' in globals():
-        bot.stop()
-    sys.exit(0)
+    try:
+        if 'bot' in globals() and bot is not None:
+            bot.stop()
+    except Exception as e:
+        print(f"Bot kapatılırken hata oluştu: {str(e)}")
+    finally:
+        sys.exit(0)
 
 def main():
     """Ana program"""
+    global bot  # bot değişkenini global olarak tanımla
+    bot = None  # Başlangıçta None olarak ayarla
+    
     try:
         # Sinyal yöneticilerini ayarla
         signal.signal(signal.SIGINT, signal_handler)

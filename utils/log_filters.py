@@ -1,29 +1,59 @@
 import logging
-import re
 
 class SensitiveDataFilter(logging.Filter):
-    """Hassas bilgileri log kayıtlarından filtreleyen sınıf"""
-    
+    """
+    Hassas verileri loglarda maskelemek için filtre
+    """
     def __init__(self):
         super().__init__()
-        # Hassas bilgi kalıpları
-        self.patterns = [
-            (r'password[\'":\s]+[^\s,}]+', 'password: ***'),
-            (r'login[\'":\s]+\d+', lambda m: re.sub(r'\d+', '***', m.group())),
-            (r'api[_-]?key[\'":\s]+[^\s,}]+', 'api_key: ***'),
-            (r'secret[\'":\s]+[^\s,}]+', 'secret: ***'),
-            (r'token[\'":\s]+[^\s,}]+', 'token: ***'),
-            (r'\b\d{16}\b', '****-****-****-****'),  # Kredi kartı numaraları
-            (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', 'email@***.com'),  # Email adresleri
+        self.sensitive_patterns = [
+            'password',
+            'api_key',
+            'secret',
+            'token',
+            'login',
+            'credential'
         ]
-
+    
     def filter(self, record):
-        if isinstance(record.msg, str):
-            msg = record.msg
-            for pattern, replacement in self.patterns:
-                if callable(replacement):
-                    msg = re.sub(pattern, replacement, msg)
-                else:
-                    msg = re.sub(pattern, replacement, msg)
-            record.msg = msg
-        return True 
+        """
+        Log mesajlarındaki hassas verileri maskele
+        
+        Parametreler:
+        - record: Log kaydı
+        
+        Dönüş:
+        - bool: Her zaman True (log kaydı her zaman geçer, sadece içeriği değiştirilir)
+        """
+        try:
+            message = record.getMessage()
+            
+            # Hassas verileri maskele
+            for pattern in self.sensitive_patterns:
+                if pattern in message.lower():
+                    # Değeri bul ve maskele
+                    parts = message.split(pattern + "=")
+                    if len(parts) > 1:
+                        # İkinci parçadaki değeri maskele
+                        value_end = parts[1].find(" ")
+                        if value_end == -1:
+                            value_end = len(parts[1])
+                        
+                        value = parts[1][:value_end]
+                        masked_value = '*' * len(value)
+                        record.msg = record.msg.replace(f"{pattern}={value}", f"{pattern}={masked_value}")
+                    
+                    # Diğer olası formatları da kontrol et
+                    parts = message.split(f'"{pattern}": "')
+                    if len(parts) > 1:
+                        value_end = parts[1].find('"')
+                        if value_end != -1:
+                            value = parts[1][:value_end]
+                            masked_value = '*' * len(value)
+                            record.msg = record.msg.replace(f'"{pattern}": "{value}"', f'"{pattern}": "{masked_value}"')
+            
+            return True
+            
+        except Exception as e:
+            # Filtre hatası durumunda orijinal mesajı değiştirmeden geçir
+            return True 

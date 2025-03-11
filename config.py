@@ -2,6 +2,10 @@ import os
 from dotenv import load_dotenv
 import json
 from pathlib import Path
+import logging
+
+# Logger oluştur
+logger = logging.getLogger("TradingBot.Config")
 
 # .env dosyasını yükle
 load_dotenv()
@@ -37,7 +41,9 @@ MODEL_CONFIG = {
         'num_layers': 4,
         'dropout': 0.4,
         'threshold_high': 0.60,  # LSTM alım sinyali için eşik
-        'threshold_low': 0.40    # LSTM satım sinyali için eşik
+        'threshold_low': 0.40,    # LSTM satım sinyali için eşik
+        'gap_session_size': 5,  # Gap ve seans özellikleri için boyut
+        'gradient_clip': 1.0    # Gradient clipping değeri
     },
     'rl': {
         'learning_rate': 0.0003,
@@ -72,9 +78,9 @@ DATA_CONFIG = {
         '1h': 500
     },
     'training_candles': {  # Optimize edilmiş eğitim veri miktarları
-        '5m': 20000,
-        '15m': 15000,
-        '1h': 10000
+        '5m': 10000,
+        '15m': 7500,
+        '1h': 5000
     },
     'retraining_interval_days': 7,
     'min_required_candles': 60,
@@ -119,7 +125,7 @@ LOGGING_CONFIG = {
     },
     'handlers': {
         'console': {
-            'level': 'INFO',
+            'level': 'WARNING',
             'formatter': 'standard',
             'class': 'logging.StreamHandler',
             'filters': ['sensitive_data']
@@ -207,9 +213,17 @@ MARKET_CHECK_INTERVALS = {
 def load_market_holidays():
     """Piyasa tatil günlerini yükle"""
     holiday_file = Path('data/market_holidays.json')
-    if holiday_file.exists():
-        with open(holiday_file, 'r') as f:
-            MARKET_HOURS['holidays'] = json.load(f)
+    if not holiday_file.exists():
+        logger.warning("market_holidays.json bulunamadı, varsayılan tatil günleri kullanılacak")
+        MARKET_HOURS['holidays'] = []
+    else:
+        try:
+            with open(holiday_file, 'r') as f:
+                MARKET_HOURS['holidays'] = json.load(f)
+                logger.info(f"{len(MARKET_HOURS['holidays'])} tatil günü yüklendi")
+        except Exception as e:
+            logger.error(f"Tatil günleri yüklenirken hata: {str(e)}")
+            MARKET_HOURS['holidays'] = []
 
 # Tatil günlerini yükle
 load_market_holidays() 

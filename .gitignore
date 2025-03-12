@@ -24,7 +24,8 @@ wheels/
 *.egg
 
 # Virtual Environment
-.venv/
+.venv
+env/
 venv/
 ENV/
 
@@ -37,8 +38,9 @@ ENV/
 .pydevproject
 
 # Logs
-logs/
 *.log
+logs/
+data_collection.log
 trading_bot.log
 error.log
 
@@ -124,3 +126,16 @@ symbols.sel
 test_*.py
 debug_*.py
 config_personal.py 
+
+# Colab and training data
+colab/
+training_data/
+debug_results.json
+
+# Google API
+config/credentials.json
+config/token.json
+*.pickle
+
+# MT5
+*.set

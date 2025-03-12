@@ -36,37 +36,37 @@ TRADING_CONFIG = {
 # Model parametreleri
 MODEL_CONFIG = {
     'lstm': {
-        'input_size': 32,  # Tüm özellikler: fiyat(5) + teknik(20) + gap(2) + seans(3) + sentiment(2)
-        'hidden_size': 256,
-        'num_layers': 4,
-        'dropout': 0.4,
-        'threshold_high': 0.60,  # LSTM alım sinyali için eşik
-        'threshold_low': 0.40,    # LSTM satım sinyali için eşik
-        'gap_session_size': 5,  # Gap ve seans özellikleri için boyut
-        'gradient_clip': 1.0    # Gradient clipping değeri
+        'input_size': 32,  # Tüm özellikler
+        'hidden_size': 256,  # Orta seviye karmaşıklık
+        'num_layers': 3,    # 3 katman
+        'dropout': 0.3,     # Dropout oranı
+        'bidirectional': True,  # Çift yönlü LSTM
+        'threshold_high': 0.65,  # Alım sinyali için eşik
+        'threshold_low': 0.35,   # Satım sinyali için eşik
+        'gradient_clip': 1.0,    # Gradient clipping değeri
     },
-    'rl': {
-        'learning_rate': 0.0003,
-        'n_steps': 2048,
-        'batch_size': 128,
-        'n_epochs': 15,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'max_grad_norm': 0.7,
-        'vf_coef': 0.5,
-        'ent_coef': 0.01
+    'attention': {
+        'dims': [512, 256, 1],  # Attention boyutları
+        'dropout': 0.2  # Attention için dropout
     },
-    'batch_size': 128,
-    'epochs': 150,
-    'learning_rate': 0.001,
-    'sequence_length': 60,
-    'prediction_steps': 1,
-    'train_split': 0.8,
-    'weight_recent_factor': 2.5,
-    'patience': 15,
-    'validation_interval': 5,
-    'early_stopping_patience': 10
+    'batch_norm': {
+        'momentum': 0.1,
+        'eps': 1e-5
+    },
+    'training': {
+        'batch_size': 64,        # Batch size
+        'epochs': 100,           # Epoch sayısı
+        'learning_rate': 0.001,  # Öğrenme oranı
+        'sequence_length': 60,   # Zaman serisi uzunluğu
+        'prediction_steps': 1,   # Tahmin adımı
+        'train_split': 0.8,      # Eğitim seti oranı
+        'validation_split': 0.1, # Validasyon seti oranı
+        'test_split': 0.1,      # Test seti oranı
+        'early_stopping_patience': 15,  # Early stopping sabır sayısı
+        'reduce_lr_patience': 8,        # Learning rate azaltma sabır sayısı
+        'reduce_lr_factor': 0.5,        # Learning rate azaltma faktörü
+        'min_lr': 1e-6                  # Minimum learning rate
+    }
 }
 
 # Veri parametreleri
@@ -78,12 +78,12 @@ DATA_CONFIG = {
         '1h': 500
     },
     'training_candles': {  # Optimize edilmiş eğitim veri miktarları
-        '5m': 10000,
-        '15m': 7500,
-        '1h': 5000
+        '5m': 1000,
+        '15m': 800,
+        '1h': 500
     },
     'retraining_interval_days': 7,
-    'min_required_candles': 60,
+    'min_required_candles': 30,
     'feature_columns': [
         'open', 'high', 'low', 'close', 'volume',
         'rsi', 'macd', 'macd_signal', 'macd_hist',

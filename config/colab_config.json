@@ -1,0 +1,16 @@
+{
+    "colab_notebook_id": "1ZM5vTURtoRBAjpZiBgymZ7PLEivFjK",
+    "drive_folders": {
+        "models": "1ZM5vTURtoRBAjpZiBgymZ7PLEivFjK",
+        "data": "1ZM5vTURtoRBAjpZiBgymZ7PLEivFjK"
+    },
+    "training": {
+        "timeout_seconds": 7200,
+        "check_interval_seconds": 60,
+        "max_retries": 3
+    },
+    "model_files": {
+        "lstm": "lstm_model.pth",
+        "status": "training_status.json"
+    }
+} 

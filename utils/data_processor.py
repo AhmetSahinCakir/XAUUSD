@@ -16,19 +16,70 @@ US_SESSION = (time(17, 0), time(23, 59))
 
 class DataProcessor:
     def __init__(self):
+        """
+        Veri işleme sınıfı başlatıcı
+        """
+        # Özellik isimleri
+        self.feature_names = [
+            'open', 'high', 'low', 'close', 'volume',  # Fiyat ve hacim
+            'rsi', 'macd', 'macd_signal', 'macd_hist',  # Momentum göstergeleri
+            'sma_10', 'sma_20', 'sma_50',  # Hareketli ortalamalar
+            'ema_10', 'ema_20', 'ema_50',
+            'upper_band', 'middle_band', 'lower_band',  # Bollinger bantları
+            'atr', 'adx', 'cci',  # Trend göstergeleri
+            'stoch_k', 'stoch_d',  # Stokastik osilatör
+            'williams_r',  # Williams %R
+            'obv',  # On Balance Volume
+            'mfi',  # Money Flow Index
+            'roc',  # Rate of Change
+            'gap_size',  # Fiyat boşluğu
+            'session_asian', 'session_london', 'session_ny',  # Seans bilgileri
+            'is_gap'  # Boşluk var mı?
+        ]
+        
+        # Scaler'ları başlat
         self.price_scaler = MinMaxScaler()
-        self.feature_scaler = MinMaxScaler()
+        self.volume_scaler = MinMaxScaler()
+        self.indicator_scaler = MinMaxScaler()
+        self.gap_scaler = MinMaxScaler()
+        
+        # Veri çerçevesi
+        self.df = None
+        
+        # Özellik grupları
+        self.price_features = ['open', 'high', 'low', 'close']
+        self.volume_features = ['volume']
+        self.indicator_features = [
+            'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'sma_10', 'sma_20', 'sma_50',
+            'ema_10', 'ema_20', 'ema_50',
+            'upper_band', 'middle_band', 'lower_band',
+            'atr', 'adx', 'cci',
+            'stoch_k', 'stoch_d',
+            'williams_r', 'obv', 'mfi', 'roc'
+        ]
+        self.gap_features = ['gap_size']
+        self.session_features = ['session_asian', 'session_london', 'session_ny', 'is_gap']
+        
+        # Özellik sayısı
+        self.n_features = len(self.feature_names)
+        
+        logger.info(f"DataProcessor başlatıldı. Toplam özellik sayısı: {self.n_features}")
+        
+        # Scaler'lar
+        self.feature_scaler = None
+        self.feature_scaler_fitted = False
+        
         self.feature_columns = ['open', 'high', 'low', 'close', 'tick_volume']
         self.all_features = [
             'open', 'high', 'low', 'close', 'tick_volume',  # 5 price features
             'RSI', 'MACD', 'Signal_Line', 'ATR', 'Upper_Band', 'Lower_Band', 'MA20',  # 7 technical indicators
-            'gap', 'gap_size', 'session_asia', 'session_europe', 'session_us'  # 5 yeni özellik
+            'gap', 'gap_size', 'session_asian', 'session_london', 'session_ny'  # 5 yeni özellik
         ]  # Total 17 features + 3 account state = 20 features
         
         # Cache for technical indicators
         self.indicators_cache = {}
         self.cache_max_size = 10  # Maximum number of DataFrames to keep in cache
-        self.feature_scaler_fitted = False
         
     def detect_price_gaps(self, df):
         """
@@ -163,9 +214,9 @@ class DataProcessor:
         try:
             if 'time' not in df.columns:
                 logger.debug("Zaman sütunu bulunamadı, seans bilgileri eklenemedi")
-                df['session_asia'] = 0
-                df['session_europe'] = 0
-                df['session_us'] = 0
+                df['session_asian'] = 0
+                df['session_london'] = 0
+                df['session_ny'] = 0
                 return df
             
             df = df.copy()
@@ -181,14 +232,14 @@ class DataProcessor:
             df['minute'] = df['time_utc'].dt.minute
             
             # Seans bilgilerini ekle
-            df['session_asia'] = df.apply(lambda x: 1 if ASIA_SESSION[0] <= time(x['hour'], x['minute']) < ASIA_SESSION[1] else 0, axis=1)
-            df['session_europe'] = df.apply(lambda x: 1 if EUROPE_SESSION[0] <= time(x['hour'], x['minute']) < EUROPE_SESSION[1] else 0, axis=1)
-            df['session_us'] = df.apply(lambda x: 1 if US_SESSION[0] <= time(x['hour'], x['minute']) <= US_SESSION[1] else 0, axis=1)
+            df['session_asian'] = df.apply(lambda x: 1 if ASIA_SESSION[0] <= time(x['hour'], x['minute']) < ASIA_SESSION[1] else 0, axis=1)
+            df['session_london'] = df.apply(lambda x: 1 if EUROPE_SESSION[0] <= time(x['hour'], x['minute']) < EUROPE_SESSION[1] else 0, axis=1)
+            df['session_ny'] = df.apply(lambda x: 1 if US_SESSION[0] <= time(x['hour'], x['minute']) <= US_SESSION[1] else 0, axis=1)
             
             # Seans dağılımını logla (sadece debug seviyesinde)
-            logger.debug(f"Seans dağılımı: Asya: {df['session_asia'].mean()*100:.1f}%, "
-                       f"Avrupa: {df['session_europe'].mean()*100:.1f}%, "
-                       f"ABD: {df['session_us'].mean()*100:.1f}%")
+            logger.debug(f"Seans dağılımı: Asya: {df['session_asian'].mean()*100:.1f}%, "
+                       f"Avrupa: {df['session_london'].mean()*100:.1f}%, "
+                       f"ABD: {df['session_ny'].mean()*100:.1f}%")
             
             # Geçici sütunları kaldır
             df = df.drop(['time_utc', 'hour', 'minute'], axis=1, errors='ignore')
@@ -201,9 +252,9 @@ class DataProcessor:
             logger.error(traceback.format_exc())
             
             # Hata durumunda varsayılan değerlerle devam et
-            df['session_asia'] = 0
-            df['session_europe'] = 0
-            df['session_us'] = 0
+            df['session_asian'] = 0
+            df['session_london'] = 0
+            df['session_ny'] = 0
             return df
     
     def add_technical_indicators(self, df):
@@ -660,16 +711,16 @@ class DataProcessor:
                     sample_weights[i] *= gap_weight_factor
                 
                 # Seans bazlı ağırlıklandırma
-                session_asia = X_train[i, -1, self.all_features.index('session_asia')]
-                session_europe = X_train[i, -1, self.all_features.index('session_europe')]
-                session_us = X_train[i, -1, self.all_features.index('session_us')]
+                session_asian = X_train[i, -1, self.all_features.index('session_asian')]
+                session_london = X_train[i, -1, self.all_features.index('session_london')]
+                session_ny = X_train[i, -1, self.all_features.index('session_ny')]
                 
                 # Farklı seanslara farklı ağırlıklar ver (örnek: Avrupa seansı daha önemli olabilir)
-                if session_asia > 0:
+                if session_asian > 0:
                     sample_weights[i] *= 1.2  # Asya seansı
-                if session_europe > 0:
+                if session_london > 0:
                     sample_weights[i] *= 1.5  # Avrupa seansı (en önemli)
-                if session_us > 0:
+                if session_ny > 0:
                     sample_weights[i] *= 1.3  # ABD seansı
             
             # Ağırlıkları normalize et (ortalama 1 olacak şekilde)
@@ -759,7 +810,7 @@ class DataProcessor:
                         latest_data[col] = latest_data[col].clip(0, 100)
                     elif col == 'gap_size':
                         latest_data[col] = latest_data[col].clip(0, 10)
-                    elif col in ['session_asia', 'session_europe', 'session_us', 'gap']:
+                    elif col in ['session_asian', 'session_london', 'session_ny', 'gap']:
                         latest_data[col] = latest_data[col].clip(0, 1)
             
             # Feature scaler'ı güncelle ve veriyi ölçeklendir
@@ -779,7 +830,7 @@ class DataProcessor:
                     # Basit MinMaxScaler yerine manuel normalizasyon yap
                     for col in self.all_features:
                         if col in latest_data.columns:
-                            if col not in ['session_asia', 'session_europe', 'session_us', 'gap']:
+                            if col not in ['session_asian', 'session_london', 'session_ny', 'gap']:
                                 max_val = df[col].max() if not df[col].isnull().all() else 1
                                 min_val = df[col].min() if not df[col].isnull().all() else 0
                                 if max_val > min_val:
@@ -807,11 +858,11 @@ class DataProcessor:
                     logger.info(f"Tahmin verisi hazırlanırken fiyat boşluğu (gap) tespit edildi. Büyüklük: {gap_size:.2f} ATR")
                 
                 # Hangi seansta olduğumuzu logla
-                if 'session_asia' in df.columns and df.iloc[-1]['session_asia'] > 0:
+                if 'session_asian' in df.columns and df.iloc[-1]['session_asian'] > 0:
                     logger.info("Şu anda Asya seansındayız")
-                elif 'session_europe' in df.columns and df.iloc[-1]['session_europe'] > 0:
+                elif 'session_london' in df.columns and df.iloc[-1]['session_london'] > 0:
                     logger.info("Şu anda Avrupa seansındayız")
-                elif 'session_us' in df.columns and df.iloc[-1]['session_us'] > 0:
+                elif 'session_ny' in df.columns and df.iloc[-1]['session_ny'] > 0:
                     logger.info("Şu anda ABD seansındayız")
                 
                 return tensor_data
@@ -855,9 +906,9 @@ class DataProcessor:
                 'gap': 0,            # Gap yok
                 'gap_size': 0,       # Gap boyutu
                 'norm_price_diff': 0, # Normalize fiyat farkı
-                'session_asia': 0,   # Seans bilgileri
-                'session_europe': 0, # Seans bilgileri
-                'session_us': 0      # Seans bilgileri
+                'session_asian': 0,   # Seans bilgileri
+                'session_london': 0, # Seans bilgileri
+                'session_ny': 0      # Seans bilgileri
             }
             
             for col in missing_cols:
@@ -871,52 +922,44 @@ class DataProcessor:
 
     def prepare_rl_state(self, df, account_info=None):
         """
-        RL modeli için durum temsili oluşturur.
-        ForexTradingEnv ile uyumlu 15 boyutlu bir state vektörü oluşturur.
+        Pekiştirmeli öğrenme için durum verisi hazırlar
         
         Parametreler:
-        - df: İşlenecek DataFrame veya Series (teknik göstergeler eklenmiş olmalı)
+        - df: Pandas DataFrame, işlenecek veri
         - account_info: Hesap durumu bilgileri (opsiyonel)
-            - balance: Mevcut bakiye
-            - initial_balance: Başlangıç bakiyesi
-            - position: Mevcut pozisyon (-1: satış, 0: bekle, 1: alış)
-            - last_trade_price: Son işlem fiyatı
         
         Dönüş:
-        - numpy array: 15 boyutlu RL state vektörü
-            - [0-4]: Fiyat verileri (open, high, low, close, tick_volume)
-            - [5-11]: Teknik göstergeler (RSI, MACD, Signal_Line, ATR, Upper_Band, Lower_Band, MA20)
-            - [12-14]: Hesap durumu (normalized_balance, position, last_trade_price_ratio)
+        - Normalize edilmiş durum vektörü
         """
         try:
-            if df is None:
-                logger.error("prepare_rl_state'e None değeri gönderildi")
+            # DataFrame kontrolü
+            if isinstance(df, pd.Series):
+                df = pd.DataFrame([df])
+            elif not isinstance(df, pd.DataFrame):
+                logger.error("Geçersiz veri tipi. DataFrame veya Series olmalı")
                 return None
             
-            # DataFrame veya Series kontrolü ve teknik göstergelerin eklenmesi
-            if isinstance(df, pd.Series):
-                # Series'i DataFrame'e çevir
-                df_temp = pd.DataFrame([df])
-                # Teknik göstergeleri ekle
-                df_temp = self.add_technical_indicators(df_temp)
-                if df_temp is None:
-                    return None
-                current_data = df_temp.iloc[0]
-            else:
-                if len(df) == 0:
-                    logger.error("prepare_rl_state'e boş DataFrame gönderildi")
-                    return None
-                # Teknik göstergeleri ekle
-                df = self.add_technical_indicators(df)
-                if df is None:
-                    return None
-                current_data = df.iloc[-1]
+            # Teknik göstergeleri ekle
+            df = self.add_technical_indicators(df)
+            if df is None:
+                logger.error("Teknik göstergeler eklenirken hata oluştu")
+                return None
             
-            # Gerekli özelliklerin varlığını kontrol et
-            required_features = ['open', 'high', 'low', 'close', 'tick_volume',
-                               'RSI', 'MACD', 'Signal_Line', 'ATR',
-                               'Upper_Band', 'Lower_Band', 'MA20']
+            # En son veriyi al
+            current_data = df.iloc[-1]
             
+            # tick_volume'u volume olarak yeniden adlandır
+            if 'tick_volume' in current_data.index and 'volume' not in current_data.index:
+                current_data['volume'] = current_data['tick_volume']
+            
+            # Gerekli özellikleri kontrol et
+            required_features = [
+                'open', 'high', 'low', 'close', 'volume',  # Fiyat verileri
+                'RSI', 'MACD', 'Signal_Line', 'ATR',  # Teknik göstergeler
+                'Upper_Band', 'Lower_Band', 'MA20'  # Bollinger bantları
+            ]
+            
+            # Eksik özellikleri kontrol et
             missing_features = [feat for feat in required_features if feat not in current_data.index]
             if missing_features:
                 logger.error(f"Eksik özellikler: {missing_features}")
@@ -924,22 +967,22 @@ class DataProcessor:
             
             # 1. Fiyat verileri (5 özellik)
             price_data = np.array([
-                current_data['open'],
-                current_data['high'],
-                current_data['low'],
-                current_data['close'],
-                current_data['tick_volume']
+                float(current_data['open']),
+                float(current_data['high']),
+                float(current_data['low']),
+                float(current_data['close']),
+                float(current_data['volume'])
             ])
             
             # 2. Teknik göstergeler (7 özellik)
             technical_indicators = np.array([
-                current_data['RSI'],
-                current_data['MACD'],
-                current_data['Signal_Line'],
-                current_data['ATR'],
-                current_data['Upper_Band'],
-                current_data['Lower_Band'],
-                current_data['MA20']
+                float(current_data['RSI']),
+                float(current_data['MACD']),
+                float(current_data['Signal_Line']),
+                float(current_data['ATR']),
+                float(current_data['Upper_Band']),
+                float(current_data['Lower_Band']),
+                float(current_data['MA20'])
             ])
             
             # 3. Hesap durumu (3 özellik)
@@ -949,7 +992,7 @@ class DataProcessor:
                 account_state = np.array([
                     account_info.get('balance', 0.0) / account_info.get('initial_balance', 1.0),
                     account_info.get('position', 0.0),
-                    account_info.get('last_trade_price', 0.0) / current_data['close'] if account_info.get('last_trade_price', 0.0) > 0 else 0.0
+                    account_info.get('last_trade_price', 0.0) / float(current_data['close']) if account_info.get('last_trade_price', 0.0) > 0 else 0.0
                 ])
             
             # Güvenli normalizasyon fonksiyonu
@@ -987,4 +1030,59 @@ class DataProcessor:
             logger.error(f"RL state hazırlanırken hata: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
+            return None
+
+    def get_feature_names(self):
+        """Özellik isimlerini döndürür"""
+        return self.feature_names.copy()
+
+    def process_training_data(self, data_dict):
+        """
+        Farklı zaman dilimleri için alınan verileri işler ve eğitim için hazırlar
+        
+        Parametreler:
+        - data_dict: Dict, her zaman dilimi için DataFrame içeren sözlük
+        
+        Dönüş:
+        - DataFrame: İşlenmiş ve birleştirilmiş veri
+        """
+        try:
+            processed_data = {}
+            
+            # Her zaman dilimi için veriyi işle
+            for timeframe, df in data_dict.items():
+                # Teknik göstergeleri ekle
+                df = self.add_technical_indicators(df.copy())
+                if df is None:
+                    continue
+                    
+                # Fiyat boşluklarını tespit et
+                df = self.detect_price_gaps(df)
+                if df is None:
+                    continue
+                    
+                # Seans bilgilerini ekle
+                df = self.add_session_info(df)
+                if df is None:
+                    continue
+                
+                # Zaman dilimi bilgisini ekle
+                df['timeframe'] = timeframe
+                
+                processed_data[timeframe] = df
+            
+            if not processed_data:
+                return None
+            
+            # Tüm verileri birleştir
+            combined_data = pd.concat(processed_data.values(), ignore_index=True)
+            
+            # Zaman sütununu düzenle
+            combined_data['time'] = pd.to_datetime(combined_data['time'])
+            combined_data = combined_data.sort_values('time')
+            
+            return combined_data
+            
+        except Exception as e:
+            logger.error(f"Veri işleme hatası: {str(e)}")
             return None

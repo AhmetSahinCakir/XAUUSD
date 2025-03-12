@@ -26,6 +26,9 @@ class SystemMonitor:
         
         self.last_gc_time = time.time()
         self.last_heartbeat_time = time.time()
+        
+        self.last_check = time.time()
+        self.check_interval = 60  # 60 saniye
     
     def start_monitoring(self):
         """İzleme thread'ini başlat"""
@@ -46,11 +49,21 @@ class SystemMonitor:
         """Ana izleme döngüsü"""
         while not self.stop_event.is_set():
             try:
+                self.check()
                 self._check_memory()
                 self._check_connection()
                 time.sleep(1)  # CPU kullanımını azaltmak için kısa bekleme
             except Exception as e:
                 logger.error(f"İzleme döngüsünde hata: {str(e)}")
+    
+    def check(self):
+        """Sistem durumunu kontrol et"""
+        current_time = time.time()
+        if current_time - self.last_check >= self.check_interval:
+            self.last_check = current_time
+            self._check_memory()
+            self._check_cpu()
+            self._check_disk()
     
     def _check_memory(self):
         """Bellek kullanımını kontrol et ve gerekirse temizle"""
@@ -89,6 +102,18 @@ class SystemMonitor:
                         self.emergency_callback()
             
             self.last_heartbeat_time = current_time
+    
+    def _check_cpu(self):
+        """CPU kullanımını kontrol et"""
+        cpu_percent = psutil.cpu_percent(interval=1)
+        if cpu_percent > 80:
+            logger.warning("⚠️ Yüksek CPU kullanımı: %{:.1f}".format(cpu_percent))
+            
+    def _check_disk(self):
+        """Disk kullanımını kontrol et"""
+        disk = psutil.disk_usage('/')
+        if disk.percent > 90:
+            logger.warning("⚠️ Yüksek disk kullanımı: %{:.1f}".format(disk.percent))
     
     def get_system_stats(self):
         """Sistem durumu istatistiklerini döndür"""

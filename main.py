@@ -21,6 +21,37 @@ import signal
 import sys
 import MetaTrader5 as mt5  # MetaTrader5 modülünü import et
 import concurrent.futures
+from utils.colab_manager import ColabManager
+import codecs
+import psutil
+
+# Windows'da Unicode desteği için
+if sys.platform == 'win32':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+
+# Renkli çıktı için yardımcı fonksiyonlar
+def print_info(message):
+    """Bilgi mesajı yazdır"""
+    print(f"\u2139 {message}")
+
+def print_success(message):
+    """Başarı mesajı yazdır"""
+    print(f"\u2705 {message}")  # ✅
+
+def print_error(message):
+    """Hata mesajı yazdır"""
+    print(f"\u274C {message}")  # ❌
+
+def print_warning(message):
+    """Uyarı mesajı yazdır"""
+    print(f"\u26A0 {message}")  # ⚠
+
+def print_section(message):
+    """Bölüm başlığı yazdır"""
+    print("\n" + "="*50)
+    print(message)
+    print("="*50 + "\n")
 
 # Loglama konfigürasyonunu uygula
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -40,6 +71,31 @@ class XAUUSDTradingBot:
         # Set up paths and config
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = os.path.join(self.base_dir, 'config.json')
+        
+        # Create config directory if it doesn't exist
+        config_dir = os.path.join(self.base_dir, 'config')
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir)
+            print_info("Config dizini oluşturuldu")
+        
+        # Check for required config files
+        required_files = {
+            'credentials.json': 'Google Cloud credentials',
+            'colab_config.json': 'Colab configuration'
+        }
+        
+        missing_files = []
+        for file, description in required_files.items():
+            if not os.path.exists(os.path.join(config_dir, file)):
+                missing_files.append(f"{file} ({description})")
+        
+        if missing_files:
+            print_warning("Eksik konfigürasyon dosyaları tespit edildi:")
+            for file in missing_files:
+                print(f"  • {file}")
+            print("\nLütfen eksik dosyaları config/ dizinine ekleyin.")
+            print("Detaylı bilgi için README.md dosyasına bakın.")
+            sys.exit(1)
         
         # Load config
         self.load_config()
@@ -80,144 +136,101 @@ class XAUUSDTradingBot:
         # Bot durumu
         self.is_running = False
         
+        # Initialize Colab Manager
+        self.colab_manager = None
+        
         # Initialize everything
         self.initialize()
         
     def initialize(self):
         """Initializes all components and models"""
         try:
-            # Create saved_models directory if it doesn't exist
-            os.makedirs('saved_models', exist_ok=True)
+            print_section("BOT BAŞLATILIYOR")
             
-            logger.info("Initializing XAUUSD Trading Bot...")
+            # MT5 bağlantısını kontrol et
+            print_info("MetaTrader 5'e bağlanılıyor...")
+            if not self.connect_mt5():
+                raise Exception("MT5 bağlantısı başarısız!")
+            print_success("MT5 bağlantısı başarılı!")
             
-            # Debug modu için kullanıcıya sor
-            debug_mode = input("\n==================================================\nBaşlangıç testlerini çalıştırmak ister misiniz? (y/n): ").strip().lower() == 'y'
-            print("==================================================")
-            
-            if debug_mode:
-                from data_debug import DataDebugger
-                debugger = DataDebugger(mt5_connector=self.mt5)  # Pass existing MT5 connector if available
-                results = debugger.run_all_tests()
-                
-                if not results.get('tests', {}).get('mt5_connection', {}).get('success', False):
-                    raise ConnectionError("MT5 bağlantı testi başarısız oldu. Lütfen MT5'in çalıştığından emin olun.")
-                
-                # Diğer test sonuçlarını kontrol et
-                failed_timeframes = []
-                timeframes_results = results.get('tests', {}).get('timeframes', {})
-                for timeframe in timeframes_results:
-                    timeframe_results = timeframes_results[timeframe]
-                    if not all([
-                        timeframe_results.get('data_retrieval', {}).get('success', False),
-                        timeframe_results.get('technical_indicators', {}).get('success', False)
-                        # RL state is optional for now
-                    ]):
-                        failed_timeframes.append(timeframe)
-                
-                if failed_timeframes:
-                    logger.warning(f"Bazı testler başarısız oldu: {failed_timeframes}")
-                    continue_anyway = input("\n==================================================\nBazı testler başarısız oldu. Devam etmek istiyor musunuz? (y/n): ").strip().lower() == 'y'
-                    print("==================================================")
-                    
-                    if not continue_anyway:
-                        raise Exception("Kullanıcı isteği ile program sonlandırıldı.")
-            
-            # Connect to MT5 (if not already connected through debugger)
-            if not hasattr(self, 'mt5') or self.mt5 is None or not self.mt5.connected:
-                print("\n==================================================")
-                print("ℹ️ MetaTrader 5'e bağlanılıyor...")
-                print("==================================================")
-                self.mt5 = MT5Connector()
-                if not self.mt5.connect():
-                    raise ConnectionError("Could not connect to MT5. Please check if MT5 is running.")
-            
-            # Initialize SystemMonitor
-            self.system_monitor = SystemMonitor(
-                mt5_connector=self.mt5,
-                emergency_callback=self.handle_emergency
-            )
-            
-            # Show account info
-            account_info = self.mt5.get_account_info()
-            if account_info:
-                print("\n==================================================")
-                print("✅ Bağlantı başarılı!")
-                print(f"Hesap: {account_info.login}")
-                print(f"Sunucu: {account_info.server}")
-                print(f"Bakiye: ${account_info.balance:.2f}")
-                print(f"Özsermaye: ${account_info.equity:.2f}")
-                print(f"Marjin: ${account_info.margin:.2f}")
-                print(f"Serbest Marjin: ${account_info.margin_free:.2f}")
-                
-                # Get symbol info
-                symbol_info = self.mt5.symbol_info("XAUUSD")
-                if symbol_info:
-                    print("\nXAUUSD sembol bilgileri:")
-                    print(f"Pip değeri: {symbol_info.point}")
-                    print(f"Spread: {symbol_info.spread} puan")
-                    print(f"Minimum lot: {symbol_info.volume_min}")
-                    print(f"Maksimum lot: {symbol_info.volume_max}")
-                    print(f"Lot adımı: {symbol_info.volume_step}")
-                print("==================================================")
-            
-            # Initialize Data Processor
+            # DataProcessor'ı başlat
             self.data_processor = DataProcessor()
+            if not self.data_processor:
+                raise Exception("DataProcessor başlatılamadı!")
             
-            # Initialize Risk Manager with initial balance from account info
-            initial_balance = account_info.balance if account_info else TRADING_CONFIG['initial_balance']
-            self.risk_manager = RiskManager(initial_balance=initial_balance)
+            # Risk Manager'ı başlat
+            account_info = self.mt5.get_account_info()
+            self.risk_manager = RiskManager(
+                initial_balance=account_info.balance,
+                risk_per_trade=TRADING_CONFIG.get('risk_per_trade', 0.01),  # Default 1%
+                max_daily_loss=TRADING_CONFIG.get('max_daily_loss', 0.05)  # Default 5%
+            )
+            if not self.risk_manager:
+                raise Exception("RiskManager başlatılamadı!")
             
-            # Prompt user for model retraining
-            self.retrain_models = False
-            self.clear_existing_models = False
+            # Başlangıç testlerini sor
+            print_section("BAŞLANGIÇ TESTLERİ")
+            if input("Başlangıç testlerini çalıştırmak ister misiniz? (y/n): ").strip().lower() == 'y':
+                if not self.run_initial_tests():
+                    print_warning("Başlangıç testleri başarısız oldu, devam edilecek...")
             
-            # Prompt user for retraining
-            retrain_input = input("\n==================================================\nModelleri yeniden eğitmek istiyor musunuz? (y/n): ").strip().lower()
-            print("==================================================")
+            # Model eğitimi gerekli mi kontrol et
+            print_section("MODEL DURUMU")
+            retrain_input = input("Modelleri yeniden eğitmek istiyor musunuz? (y/n): ").strip().lower()
             
             if retrain_input == 'y':
                 self.retrain_models = True
-                clean_start_input = input("\n==================================================\nMevcut modelleri silip sıfırdan başlamak istiyor musunuz? (y/n): ").strip().lower()
-                print("==================================================")
+                clean_start_input = input("Mevcut modelleri silip sıfırdan başlamak istiyor musunuz? (y/n): ").strip().lower()
                 
                 if clean_start_input == 'y':
                     self.clear_existing_models = True
-                    print("\n==================================================")
-                    print("ℹ️ Mevcut modeller silinecek ve eğitim sıfırdan başlayacak.")
-                    print("==================================================")
-            
-            # Load or create models
-            models_loaded = self.load_or_create_models(retrain=self.retrain_models, clean_start=self.clear_existing_models)
+                    print_info("Mevcut modeller silinecek ve eğitim sıfırdan başlayacak.")
+                    
+                    # Mevcut model dosyalarını sil
+                    if os.path.exists('saved_models'):
+                        for file in os.listdir('saved_models'):
+                            if file.endswith('.pth'):
+                                os.remove(os.path.join('saved_models', file))
+                        print_success("Mevcut modeller silindi!")
                 
-            if models_loaded:
-                print("Modeller başarıyla yüklendi.")
+                # Model eğitimini başlat
+                if not self.train_models():
+                    raise Exception("Model eğitimi başarısız!")
+                
+                # Eğitilen modelleri yükle
+                if not self.load_or_create_models(retrain=True):
+                    raise Exception("Model yükleme başarısız!")
+            else:
+                # Mevcut modelleri yükle
+                if not self.load_or_create_models():
+                    raise Exception("Model yükleme başarısız!")
             
             # MarketHours nesnesini başlat
             self.market_hours = MarketHours()
+            if not self.market_hours:
+                raise Exception("MarketHours başlatılamadı!")
             
-            # Initialize RL Trader
-            if not hasattr(self, 'rl_trader') or self.rl_trader is None:
-                try:
-                    self.rl_trader = RLTrader(
-                        state_size=len(self.data_processor.get_feature_names()),
-                        action_size=3,  # Alım, Satım, Bekle
-                        learning_rate=MODEL_CONFIG['rl']['learning_rate']
-                    )
-                    logger.info("RL Trader başarıyla başlatıldı")
-                except Exception as e:
-                    logger.error(f"RL Trader başlatılamadı: {str(e)}")
-                    self.rl_trader = None
+            # RL Trader'ı başlat
+            try:
+                self.rl_trader = RLTrader(
+                    state_size=len(self.data_processor.get_feature_names()),
+                    action_size=3,
+                    learning_rate=MODEL_CONFIG['rl']['learning_rate']
+                )
+                print_success("RL Trader başarıyla başlatıldı!")
+            except Exception as e:
+                print_warning("RL Trader başlatılamadı, yalnızca LSTM ile devam edilecek!")
+                self.rl_trader = None
+            
+            print_section("BOT HAZIR!")
+            return True
             
         except Exception as e:
-            logger.error(f"Initialization error: {str(e)}")
-            print("\n==================================================")
-            print(f"❌ Bot başlatma hatası: {str(e)}")
-            print("==================================================")
-            import traceback
+            print_error(f"Bot başlatma hatası: {str(e)}")
+            logger.error(f"Bot başlatma hatası: {str(e)}")
             logger.error(traceback.format_exc())
-            raise
-        
+            return False
+
     def check_and_retrain_models(self):
         """Check if models need retraining and retrain if necessary"""
         # Create metadata file path
@@ -288,15 +301,14 @@ class XAUUSDTradingBot:
             
             # Eğer temiz başlangıç isteniyorsa, mevcut modelleri sil
             if clean_start:
-                print("\n==================================================")
-                print("ℹ️ Mevcut modelleri silme işlemi başlatılıyor...")
+                print_info("Mevcut modelleri silme işlemi başlatılıyor...")
                 model_files = [f for f in os.listdir('saved_models') if f.endswith('.pth')]
                 if model_files:
                     for file in model_files:
                         os.remove(os.path.join('saved_models', file))
-                    print(f"✅ {len(model_files)} model dosyası silindi.")
+                    print_success(f"{len(model_files)} model dosyası silindi.")
                 else:
-                    print("ℹ️ Silinecek model dosyası bulunamadı.")
+                    print_info("Silinecek model dosyası bulunamadı.")
                 print("==================================================")
 
             # Eğer yeniden eğitim isteniyorsa, direkt eğitime başla
@@ -310,25 +322,30 @@ class XAUUSDTradingBot:
             for timeframe in self.timeframes:
                 # Her timeframe için en son kaydedilen modeli bul
                 model_files = [f for f in os.listdir('saved_models') 
-                             if f.startswith(f'lstm_model_{timeframe}') and f.endswith('.pth')]
+                             if f.startswith(f'lstm_{timeframe}') and f.endswith('.pth')]
+                
+                print_info(f"\nAranan model dosyaları ({timeframe}): lstm_{timeframe}*.pth")
+                print(f"Bulunan dosyalar: {model_files}")
                 
                 if model_files:
                     # En son kaydedilen modeli al (tarih_saat bilgisine göre)
                     latest_model = sorted(model_files)[-1]
                     model_path = os.path.join('saved_models', latest_model)
                     
+                    print(f"Yüklenecek model: {model_path}")
+                    
                     try:
                         self.lstm_models[timeframe] = LSTMPredictor.load_model(model_path)
                         models_loaded = True
                         logger.info(f"{timeframe} modeli başarıyla yüklendi: {latest_model}")
+                        print_success(f"{timeframe} modeli başarıyla yüklendi")
                     except Exception as e:
                         logger.error(f"{timeframe} modeli yüklenirken hata: {str(e)}")
+                        print_error(f"{timeframe} modeli yüklenirken hata: {str(e)}")
 
             if not models_loaded:
                 logger.error("Hiçbir model yüklenemedi!")
-                print("\n==================================================")
-                print("⚠️ Model bulunamadı veya yüklenemedi! ⚠️")
-                print("Bot çalışmak için eğitilmiş modellere ihtiyaç duyar.")
+                print_warning("Model bulunamadı veya yüklenemedi! Bot çalışmak için eğitilmiş modellere ihtiyaç duyar.")
                 print("==================================================\n")
                 user_input = input("Modelleri eğitmek ister misiniz? Bu işlem zaman alabilir. (y/n): ")
                 if user_input.lower() == 'y':
@@ -343,65 +360,121 @@ class XAUUSDTradingBot:
             return False
 
     def train_models(self):
-        """Train all models (LSTM and RL)"""
-        logger.info("Starting model training")
-        print("Starting model training...")
+        """Modelleri eğit"""
+        print_section("MODEL EĞİTİMİ BAŞLATILIYOR")
+
+        print("Eğitim yöntemi seçin:")
+        print("-"*30)
+        print("1) Google Colab (Hızlı, GPU destekli)")
+        print("2) Yerel Bilgisayar (Yavaş, CPU)")
+        print("-"*30)
         
+        while True:
+            choice = input("Seçiminiz (1/2): ").strip()
+            if choice in ['1', '2']:
+                break
+            print("Lütfen geçerli bir seçim yapın (1 veya 2)")
+
+        if choice == '1':
+            print("\n[BILGI] Google Colab eğitimi seçildi")
+            print("✓ Avantajlar:")
+            print("  • Daha hızlı eğitim (GPU kullanımı)")
+            print("  • Bilgisayarınızı yormaz")
+            print("  • Eğitim sırasında bilgisayarınızı kullanabilirsiniz")
+            print("\n! Gereksinimler:")
+            print("  • Google hesabı")
+            print("  • İnternet bağlantısı")
+            print("  • credentials.json dosyası")
+            print("-"*50)
+            
+            return self._train_models_colab()
+        else:
+            print("\n[BILGI] Yerel eğitim seçildi")
+            print("✓ Avantajlar:")
+            print("  • İnternet bağlantısı gerekmez")
+            print("  • Google hesabı gerekmez")
+            print("\n! Dikkat:")
+            print("  • Eğitim süresi uzun olabilir")
+            print("  • Bilgisayarınız yoğun çalışacak")
+            print("  • Eğitim sırasında bilgisayarınız yavaşlayabilir")
+            print("-"*50)
+            
+            return self._train_models_local()
+
+    def _train_models_colab(self):
+        """Google Colab üzerinde modelleri eğit"""
         try:
-            # Get different amounts of data for each timeframe
-            # Use larger datasets for training - optimized for better model performance
-            training_candles = DATA_CONFIG['training_candles']
+            print("\n[BILGI] Google Colab entegrasyonu başlatılıyor...")
+            print("="*50)
             
-            logger.info("Starting data collection for training...")
-            print("Eğitim için veri toplanıyor. Bu işlem büyük veri miktarı nedeniyle biraz zaman alabilir...")
+            self.colab_manager = ColabManager()
+            print("[BILGI] Colab bağlantısı başarılı!")
             
-            # Başarılı eğitilen model sayısını takip et
-            successfully_trained_count = 0
-            total_models = len(self.timeframes)
+            print("[BILGI] Eğitim verisi hazırlanıyor...")
+            data_file = self.prepare_training_data()
+            if not data_file:
+                raise Exception("Veri hazırlama hatası!")
+            print("[BASARILI] Eğitim verisi hazırlandı!")
             
-            # Train LSTM models for each timeframe
+            print("[BILGI] Veriler Google Drive'a yükleniyor...")
+            if not self.colab_manager.upload_data_to_drive(data_file):
+                raise Exception("Veri yükleme hatası!")
+            print("[BASARILI] Veriler başarıyla yüklendi!")
+            
+            print("[BILGI] Colab'da eğitim başlatılıyor...")
+            if not self.colab_manager.start_colab_training():
+                raise Exception("Colab eğitimi başlatma hatası!")
+            print("[BASARILI] Eğitim başarıyla başlatıldı!")
+            
+            print("[BILGI] Eğitimin tamamlanması bekleniyor...")
+            if not self.colab_manager.wait_for_training_completion():
+                raise Exception("Model eğitimi tamamlanamadı!")
+            print("[BASARILI] Eğitim başarıyla tamamlandı!")
+            
+            print("[BILGI] Eğitilen model indiriliyor...")
+            if not self.colab_manager.download_model():
+                raise Exception("Model indirme hatası!")
+            print("[BASARILI] Model başarıyla indirildi!")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Colab eğitim hatası: {str(e)}")
+            print(f"[HATA] Colab eğitim hatası: {str(e)}")
+            return False
+
+    def _train_models_local(self):
+        """Yerel bilgisayarda modelleri eğit"""
+        try:
+            print("\n[BILGI] Yerel eğitim başlatılıyor...")
+            print("="*50)
+            
+            # Her zaman dilimi için ayrı eğitim
             for timeframe in self.timeframes:
-                print(f"\n{timeframe} zaman dilimi için LSTM modeli eğitiliyor...")
+                print(f"\n[BILGI] {timeframe} zaman dilimi için LSTM modeli eğitiliyor...")
+                print(f"[BILGI] Bu işlem birkaç saat sürebilir, lütfen bekleyin...")
+                
                 success = self.train_lstm_model(timeframe)
                 if success:
-                    print(f"{timeframe} LSTM modeli başarıyla eğitildi.")
-                    successfully_trained_count += 1
+                    print(f"[BASARILI] {timeframe} modeli başarıyla eğitildi!")
                 else:
-                    print(f"{timeframe} LSTM modeli eğitimi başarısız oldu.")
+                    print(f"[HATA] {timeframe} modeli eğitimi başarısız oldu!")
+                    return False
             
-            # Update training metadata with retraining interval from config
-            metadata = {
-                'last_training_time': datetime.now().isoformat(),
-                'retraining_interval_days': DATA_CONFIG['retraining_interval_days']
-            }
+            print("\n[BASARILI] Tüm modeller başarıyla eğitildi!")
+            return True
             
-            os.makedirs("saved_models", exist_ok=True)
-            with open("saved_models/training_metadata.json", 'w') as f:
-                json.dump(metadata, f)
-            
-            # Tüm modeller başarıyla eğitildi mi kontrol et
-            if successfully_trained_count == total_models:
-                logger.info("Tüm modeller başarıyla eğitildi")
-                print("Tüm modeller başarıyla eğitildi!")
-            elif successfully_trained_count > 0:
-                logger.warning(f"Sadece {successfully_trained_count}/{total_models} model başarıyla eğitildi")
-                print(f"Uyarı: {successfully_trained_count}/{total_models} model başarıyla eğitildi. Diğer modeller eğitilemedi.")
-            else:
-                logger.error("Hiçbir model başarıyla eğitilemedi")
-                print("Hata: Hiçbir model başarıyla eğitilemedi! Bot düzgün çalışmayabilir.")
-        
         except Exception as e:
-            logger.error(f"Error during model training: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            raise
+            logger.error(f"Yerel eğitim hatası: {str(e)}")
+            print(f"[HATA] Yerel eğitim hatası: {str(e)}")
+            return False
 
     def get_trading_signals(self, timeframe):
         """
         Belirli bir zaman dilimi için ticaret sinyalleri üretir
         
         Parametreler:
-        - timeframe: Zaman dilimi (örn. '1m', '5m', '15m')
+        - timeframe: Zaman dilimi (örn. '5m', '15m', '1h')
         
         Dönüş:
         - lstm_prediction: LSTM modeli tahmini
@@ -417,7 +490,7 @@ class XAUUSDTradingBot:
             logger.debug(f"{timeframe} zaman dilimi için ticaret sinyalleri üretiliyor...")
             
             # Veri doğrulama - 1: Timeframe kontrolü
-            valid_timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', 'D1']
+            valid_timeframes = ['5m', '15m', '30m', '1h', '4h', 'D1']
             if timeframe not in valid_timeframes:
                 logger.error(f"Geçersiz zaman dilimi: {timeframe}")
                 return None, None
@@ -600,7 +673,7 @@ class XAUUSDTradingBot:
     def execute_trade(self, timeframe, lstm_pred, rl_action):
         """Execute trades based on model predictions"""
         try:
-            print(f"\n====== TİCARET YÜRÜTME BAŞLANGIÇ ({timeframe}) ======")
+            print_section(f"TİCARET YÜRÜTME BAŞLANGIÇ ({timeframe})")
             
             # Piyasa açık mı kontrol et
             if not self.market_hours.is_market_open():
@@ -718,101 +791,128 @@ class XAUUSDTradingBot:
             logger.error(f"İşlem hatası: {str(e)}")
             print(f"İşlem hatası: {str(e)}")
         finally:
-            print("====== TİCARET YÜRÜTME BİTİŞ ======\n")
+            print_section("TİCARET YÜRÜTME BİTİŞ")
         
     def run(self):
         """Runs the Trading Bot"""
-        print("\nStarting XAUUSD Trading Bot...")
-        print("Press Ctrl+C to stop the bot")
-        print("==============================")
-        logger.info("Starting XAUUSD Trading Bot")
-        
-        # Bot durumunu güncelle
-        self.is_running = True
-        
-        # RL model kontrolü
-        if self.rl_trader is None:
-            print("\nUYARI: RL modeli bulunamadı veya düzgün yüklenemedi!")
-            print("Bot yalnızca LSTM modeli kullanarak çalışacak.")
-            print("Daha iyi sonuçlar için, bot'u durdurup modelleri yeniden eğitebilirsiniz.")
-            logger.warning("RL model is not initialized, running with LSTM only")
-        
         try:
-            while self.is_running:
-                # Sistem durumunu kontrol et
-                self.system_monitor.check()
-                system_stats = self.system_monitor.get_system_stats()
-                
-                # Kritik durum kontrolü
-                if system_stats['memory_usage'] > 85:  # %85'den fazla bellek kullanımı
-                    logger.warning(f"Yüksek bellek kullanımı: {system_stats['memory_usage']:.1f}%")
-                    gc.collect()  # Garbage collection'ı zorla
-                
-                if not self.mt5.connect():
-                    logger.error("MT5 connection failed, retrying...")
-                    print("MT5 connection failed, retrying...")
-                    time.sleep(60)
-                    continue
-                
-                # Piyasa durumunu kontrol et
-                if not self.market_hours.is_market_open():
-                    logger.info("Piyasa kapalı, bekleniyor...")
-                    print("Piyasa kapalı, bekleniyor...")
-                    time.sleep(300)  # 5 dakika bekle
-                    continue
-                
-                # Aktif seansları kontrol et
-                active_sessions = self.market_hours.get_current_sessions()
-                if active_sessions:
-                    logger.info(f"Aktif seanslar: {', '.join(active_sessions)}")
-                    print(f"Aktif seanslar: {', '.join(active_sessions)}")
-                
-                current_time = time.strftime('%Y-%m-%d %H:%M:%S')
-                print(f"\n[{current_time}]")
-                logger.info(f"Processing cycle at {current_time}")
-                
-                # Check trades for each timeframe
-                for timeframe in self.timeframes:
-                    try:
-                        lstm_pred, rl_action = self.get_trading_signals(timeframe)
-                        if lstm_pred is not None and rl_action is not None:
-                            self.execute_trade(timeframe, lstm_pred, rl_action)
-                    except Exception as e:
-                        logger.error(f"Error processing {timeframe}: {str(e)}")
-                        print(f"Error processing {timeframe}: {str(e)}")
-                        continue  # Continue with next timeframe
-                        
-                # Check and reset daily statistics
-                account_info = self.mt5.get_account_info()
-                if account_info:
-                    balance_msg = f"Balance: ${account_info.balance:.2f}, Daily P/L: ${self.risk_manager.daily_pnl:.2f}"
-                    print(balance_msg)
-                    logger.info(balance_msg)
-                    
-                # Reset statistics at the start of each day
-                if time.localtime().tm_hour == 0 and time.localtime().tm_min == 0:
-                    self.risk_manager.reset_daily_stats()
-                    logger.info("Daily statistics reset")
-                    print("Daily statistics reset")
-                    
-                # Wait before next iteration
-                logger.info("Waiting for next cycle")
-                time.sleep(60)  # Wait for 1 minute
-                
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
-            print("\nBot stopped by user.")
-            self.mt5.disconnect()
-        except Exception as e:
-            logger.error(f"Critical error: {str(e)}")
-            print(f"\nError occurred: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            self.mt5.disconnect()
+            print_section("XAUUSD TRADING BOT BAŞLATILIYOR")
+            print("Bot'u durdurmak için Ctrl+C tuşlarına basın")
+            print_section("SİSTEM KONTROLÜ")
             
+            # Sistem kontrollerini yap
+            if not self.system_check():
+                raise Exception("Sistem kontrolleri başarısız!")
+            
+            # Model kontrolü
+            if not any(self.lstm_models.values()):
+                print_warning("LSTM modelleri bulunamadı veya yüklenemedi!")
+                if input("Modelleri yeniden eğitmek ister misiniz? (y/n): ").strip().lower() == 'y':
+                    if not self.train_models():
+                        raise Exception("Model eğitimi başarısız!")
+                else:
+                    raise Exception("Çalışır durumda model bulunamadı!")
+            
+            if not self.rl_trader:
+                print_warning("RL modeli bulunamadı veya düzgün yüklenemedi!")
+                print_info("Bot yalnızca LSTM modeli kullanarak çalışacak.")
+                print_info("Daha iyi sonuçlar için, bot'u durdurup modelleri yeniden eğitebilirsiniz.")
+            
+            # Trading döngüsünü başlat
+            print_section("TRADING DÖNGÜSÜ BAŞLIYOR")
+            self.is_running = True
+            
+            while self.is_running:
+                try:
+                    # Piyasa açık mı kontrol et
+                    if not self.market_hours.is_market_open():
+                        print_info("Piyasa kapalı. Bir sonraki açılışı bekleniyor...")
+                        time.sleep(60)  # 1 dakika bekle
+                        continue
+                    
+                    # Her timeframe için işlem yap
+                    for timeframe in self.timeframes:
+                        self.execute_trades(timeframe)
+                    
+                    # Sistem durumunu kontrol et
+                    if not self.system_monitor.check_status():
+                        print_warning("Sistem durumu kritik! Yeniden başlatılıyor...")
+                        self.restart()
+                    
+                    # Belleği temizle
+                    gc.collect()
+                    
+                    # Kısa bir süre bekle
+                    time.sleep(5)
+                    
+                except Exception as e:
+                    logger.error(f"Trading döngüsü hatası: {str(e)}")
+                    print_error(f"Trading döngüsü hatası: {str(e)}")
+                    print_info("3 saniye sonra yeniden denenecek...")
+                    time.sleep(3)
+            
+        except KeyboardInterrupt:
+            print_info("\nBot kullanıcı tarafından durduruldu.")
+        except Exception as e:
+            logger.error(f"Kritik hata: {str(e)}")
+            print_error(f"Kritik hata: {str(e)}")
+        finally:
+            self.cleanup()
+            print_section("BOT DURDURULDU")
+
+    def system_check(self):
+        """Sistem durumunu kontrol et"""
+        try:
+            # MT5 bağlantısı
+            if not self.mt5 or not self.mt5.connected:
+                print_error("MT5 bağlantısı yok!")
+                return False
+            
+            # Bellek durumu
+            if self.system_monitor.memory_usage > 90:
+                print_error("Yüksek bellek kullanımı!")
+                return False
+            
+            # CPU durumu
+            if self.system_monitor.cpu_usage > 95:
+                print_error("Yüksek CPU kullanımı!")
+                return False
+            
+            # Disk durumu
+            if self.system_monitor.disk_usage > 95:
+                print_error("Düşük disk alanı!")
+                return False
+            
+            print_success("Sistem kontrolleri başarılı!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Sistem kontrol hatası: {str(e)}")
+            print_error(f"Sistem kontrol hatası: {str(e)}")
+            return False
+
+    def cleanup(self):
+        """Kaynakları temizle"""
+        try:
+            # MT5 bağlantısını kapat
+            if self.mt5:
+                self.mt5.shutdown()
+                print_info("MT5 bağlantısı kapatıldı.")
+            
+            # Belleği temizle
+            gc.collect()
+            print_info("Bellek temizlendi.")
+            
+            # Log dosyalarını kapat
+            logging.shutdown()
+            print_info("Log sistemi kapatıldı.")
+            
+        except Exception as e:
+            logger.error(f"Temizleme hatası: {str(e)}")
+            print_error(f"Temizleme hatası: {str(e)}")
+
     def get_memory_usage(self):
         """Return current memory usage in MB"""
-        import psutil
         process = psutil.Process(os.getpid())
         return process.memory_info().rss / 1024 / 1024  # Convert to MB
 
@@ -829,29 +929,60 @@ class XAUUSDTradingBot:
         logger.info("Konfigürasyon yüklendi")
         
     def setup_logger(self):
-        """
-        Loglama sistemini yapılandırır
-        """
-        import logging
-        import logging.config
-        from config import LOGGING_CONFIG
-        
-        # Loglama konfigürasyonunu uygula
-        logging.config.dictConfig(LOGGING_CONFIG)
-        
-        # Ana logger'ı al
-        self.logger = logging.getLogger("TradingBot")
-        
-        self.logger.info("Loglama sistemi başlatıldı")
-        
-        return self.logger
+        """Logger'ı yapılandır"""
+        try:
+            # Log dizinini oluştur
+            os.makedirs('logs', exist_ok=True)
+            
+            # Dosya adını oluştur
+            log_filename = f'logs/trading_bot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+            
+            # Root logger'ı yapılandır
+            root_logger = logging.getLogger()
+            root_logger.setLevel(logging.INFO)
+            
+            # Konsol handler'ı oluştur ve yapılandır
+            if sys.platform == 'win32':
+                # Windows için özel handler
+                sys.stdout.reconfigure(encoding='utf-8')
+                console_handler = logging.StreamHandler(sys.stdout)
+            else:
+                console_handler = logging.StreamHandler(sys.stdout)
+            
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('%(message)s')
+            console_handler.setFormatter(console_formatter)
+            
+            # Dosya handler'ı oluştur ve yapılandır
+            file_handler = logging.FileHandler(log_filename, 'a', 'utf-8')
+            file_handler.setLevel(logging.DEBUG)
+            file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+            file_handler.setFormatter(file_formatter)
+            
+            # Mevcut handler'ları temizle
+            root_logger.handlers.clear()
+            
+            # Yeni handler'ları ekle
+            root_logger.addHandler(console_handler)
+            root_logger.addHandler(file_handler)
+            
+            # Trading bot logger'ını yapılandır
+            self.logger = logging.getLogger("TradingBot")
+            self.logger.setLevel(logging.INFO)
+            
+            self.logger.info("Logger başarıyla yapılandırıldı")
+            return True
+            
+        except Exception as e:
+            print(f"Logger yapılandırma hatası: {str(e)}")
+            return False
 
     def train_lstm_model(self, timeframe):
         """
         Belirli bir zaman dilimi için LSTM modelini eğitir
         
         Parametreler:
-        - timeframe: Zaman dilimi (örn. '1m', '5m', '15m')
+        - timeframe: Zaman dilimi (örn. '5m', '15m', '1h')
         
         Dönüş:
         - bool: Eğitim başarılı ise True, değilse False
@@ -1008,7 +1139,7 @@ class XAUUSDTradingBot:
             os.makedirs(models_dir, exist_ok=True)
             
             # Model dosya adını oluştur (timeframe_tarih_saat.pth)
-            model_filename = f"lstm_model_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            model_filename = f"lstm_{timeframe}"
             model_path = os.path.join(models_dir, f"{model_filename}.pth")
             
             # Modeli kaydet
@@ -1176,7 +1307,7 @@ class XAUUSDTradingBot:
             os._exit(1)
 
     def stop(self):
-        """Botu güvenli bir şekilde durdur"""
+        """Bot'u güvenli bir şekilde durdur"""
         try:
             logger.info("Bot durduruluyor...")
             print("\n==================================================")
@@ -1218,6 +1349,203 @@ class XAUUSDTradingBot:
         except Exception as e:
             logger.error(f"Bot durdurulurken hata: {str(e)}")
             print(f"\nHata: Bot durdurulurken bir sorun oluştu: {str(e)}")
+
+    def prepare_training_data(self):
+        """Prepare and save training data"""
+        try:
+            # Veriyi hazırla
+            data = {}
+            for timeframe in self.timeframes:
+                candles = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=DATA_CONFIG['training_candles'][timeframe])
+                if candles is None:
+                    raise Exception(f"Veri çekme hatası: {timeframe}")
+                data[timeframe] = candles
+                
+            # Veriyi işle
+            processed_data = self.data_processor.process_training_data(data)
+            
+            # CSV olarak kaydet
+            save_path = "data/training_data.csv"
+            processed_data.to_csv(save_path, index=False)
+            
+            return save_path
+            
+        except Exception as e:
+            logger.error(f"Veri hazırlama hatası: {str(e)}")
+            return None
+
+    def connect_mt5(self):
+        """MT5'e bağlan ve hesap bilgilerini kontrol et"""
+        try:
+            # MT5 bağlantısını oluştur
+            self.mt5 = MT5Connector(
+                login=self.config['MT5']['login'],
+                password=self.config['MT5']['password'],
+                server=self.config['MT5']['server']
+            )
+            
+            # Bağlantı kontrolü
+            if not self.mt5.connected:
+                print_error("MT5 bağlantısı kurulamadı!")
+                print_info("Lütfen MT5 terminalinin açık olduğundan emin olun.")
+                return False
+            
+            # Hesap bilgilerini göster
+            account_info = self.mt5.get_account_info()
+            if account_info:
+                print_success("Bağlantı başarılı!")
+                print(f"Hesap: {account_info.login}")
+                print(f"Sunucu: {account_info.server}")
+                print(f"Bakiye: ${account_info.balance:.2f}")
+                print(f"Özsermaye: ${account_info.equity:.2f}")
+                print(f"Marjin: ${account_info.margin:.2f}")
+                print(f"Serbest Marjin: ${account_info.margin_free:.2f}")
+            
+            # Sembol bilgilerini kontrol et
+            symbol_info = self.mt5.symbol_info("XAUUSD")
+            if symbol_info is None:
+                print_warning("XAUUSD sembolü bulunamadı!")
+                print_info("Lütfen sembolün doğru olduğundan emin olun.")
+                return False
+            
+            print_info("XAUUSD sembol bilgileri:")
+            print(f"Pip değeri: {symbol_info.point}")
+            print(f"Spread: {symbol_info.spread} puan")
+            print(f"Minimum lot: {symbol_info.volume_min}")
+            print(f"Maksimum lot: {symbol_info.volume_max}")
+            print(f"Lot adımı: {symbol_info.volume_step}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"MT5 bağlantı hatası: {str(e)}")
+            print_error(f"MT5 bağlantı hatası: {str(e)}")
+            return False
+
+    def run_initial_tests(self):
+        """Başlangıç testlerini çalıştır"""
+        try:
+            print_info("Başlangıç testleri çalıştırılıyor...")
+            
+            # MT5 bağlantı testi
+            if not self.mt5 or not self.mt5.connected:
+                print_error("MT5 bağlantı testi başarısız!")
+                return False
+            print_success("MT5 bağlantı testi başarılı")
+            
+            # Veri çekme testi
+            for timeframe in self.timeframes:
+                print_info(f"{timeframe} için veri çekme testi...")
+                data = self.mt5.get_historical_data("XAUUSD", timeframe, num_candles=100)
+                if data is None or len(data) < 100:
+                    print_error(f"{timeframe} veri çekme testi başarısız!")
+                    return False
+                print_success(f"{timeframe} veri çekme testi başarılı")
+            
+            # Teknik gösterge hesaplama testi
+            print_info("Teknik gösterge hesaplama testi...")
+            if not hasattr(self, 'data_processor'):
+                self.data_processor = DataProcessor()
+            
+            test_data = self.mt5.get_historical_data("XAUUSD", "5m", num_candles=100)
+            if test_data is None:
+                print_error("Test verisi alınamadı!")
+                return False
+            
+            processed_data = self.data_processor.add_technical_indicators(test_data)
+            if processed_data is None:
+                print_error("Teknik gösterge hesaplama testi başarısız!")
+                return False
+            print_success("Teknik gösterge hesaplama testi başarılı")
+            
+            # Risk yönetimi testi
+            print_info("Risk yönetimi testi...")
+            if not hasattr(self, 'risk_manager'):
+                self.risk_manager = RiskManager(initial_balance=100000)
+            
+            # Test trade parameters
+            entry_price = 2000
+            stop_loss = 1990
+            
+            # Test position size calculation
+            lot_size = self.risk_manager.calculate_position_size(entry_price, stop_loss)
+            if lot_size <= 0:
+                print_error("Risk yönetimi testi başarısız - Lot hesaplama hatası!")
+                return False
+                
+            # Test trading permission
+            if not self.risk_manager.can_trade():
+                print_error("Risk yönetimi testi başarısız - İşlem izni hatası!")
+                return False
+                
+            print_success("Risk yönetimi testi başarılı")
+            
+            print_success("Tüm başlangıç testleri başarılı!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Test hatası: {str(e)}")
+            print_error(f"Test hatası: {str(e)}")
+            return False
+
+    def check_system_resources(self):
+        """Sistem kaynaklarını kontrol et"""
+        try:
+            # Bellek kullanımını kontrol et
+            process = psutil.Process(os.getpid())
+            memory_usage = process.memory_info().rss / 1024 / 1024  # MB cinsinden
+            
+            # CPU kullanımını kontrol et
+            cpu_percent = psutil.cpu_percent(interval=1)
+            
+            # Disk alanını kontrol et
+            disk_usage = psutil.disk_usage('/').percent
+            
+            self.logger.info(f"""
+==================================================
+SİSTEM KAYNAKLARI
+==================================================
+Bellek Kullanımı: {memory_usage:.2f} MB
+CPU Kullanımı: {cpu_percent:.1f}%
+Disk Kullanımı: {disk_usage:.1f}%
+==================================================
+""")
+            
+            # Eşik değerlerini kontrol et
+            if memory_usage > 1024:  # 1 GB
+                self.logger.warning("⚠ Yüksek bellek kullanımı!")
+            if cpu_percent > 80:
+                self.logger.warning("⚠ Yüksek CPU kullanımı!")
+            if disk_usage > 90:
+                self.logger.warning("⚠ Disk alanı kritik seviyede!")
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Sistem kontrol hatası: {str(e)}")
+            return False
+
+    def shutdown(self):
+        """Bot'u güvenli bir şekilde durdur"""
+        try:
+            self.logger.info("\n==================================================")
+            self.logger.info("BOT DURDURULDU")
+            self.logger.info("==================================================\n")
+            
+            # MT5 bağlantısını kapat
+            if hasattr(self, 'mt5_connector'):
+                self.mt5_connector.disconnect()
+            
+            # Açık dosyaları kapat
+            for handler in self.logger.handlers[:]:
+                handler.close()
+                self.logger.removeHandler(handler)
+            
+            return True
+            
+        except Exception as e:
+            print(f"\nTemizleme hatası: {str(e)}")
+            return False
 
 def signal_handler(signum, frame):
     """Sinyal yöneticisi"""

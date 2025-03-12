@@ -6,36 +6,25 @@ from datetime import datetime
 import os
 import logging
 from tqdm import tqdm
+import torch.nn.functional as F
 
 logger = logging.getLogger("TradingBot.LSTMModel")
 
 class LSTMPredictor(nn.Module):
-    def __init__(self, input_size=17, hidden_size=128, num_layers=3, dropout=0.3):
+    def __init__(self, config):
         """
         LSTM tabanlı tahmin modeli
         
         Parametreler:
-        - input_size: Giriş özelliklerinin sayısı (varsayılan: 17 - fiyat, teknik göstergeler, gap ve seans bilgileri)
-        - hidden_size: LSTM gizli katman boyutu
-        - num_layers: LSTM katman sayısı
-        - dropout: Dropout oranı
+        - config: Model yapılandırma bilgileri
         """
         super(LSTMPredictor, self).__init__()
         
-        # Parametre doğrulama
-        if not isinstance(input_size, int) or input_size <= 0:
-            raise ValueError(f"input_size pozitif bir tamsayı olmalıdır, alınan: {input_size}")
-        if not isinstance(hidden_size, int) or hidden_size <= 0:
-            raise ValueError(f"hidden_size pozitif bir tamsayı olmalıdır, alınan: {hidden_size}")
-        if not isinstance(num_layers, int) or num_layers <= 0:
-            raise ValueError(f"num_layers pozitif bir tamsayı olmalıdır, alınan: {num_layers}")
-        if not isinstance(dropout, (int, float)) or not 0 <= dropout < 1:
-            raise ValueError(f"dropout 0 ile 1 arasında bir değer olmalıdır, alınan: {dropout}")
-        
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.dropout = dropout
+        # Config parametrelerini al
+        self.input_size = config['lstm']['input_size']
+        self.hidden_size = config['lstm']['hidden_size']
+        self.num_layers = config['lstm']['num_layers']
+        self.dropout = config['lstm']['dropout']
         
         # CUDA kullanılabilirliğini kontrol et
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -43,36 +32,38 @@ class LSTMPredictor(nn.Module):
         
         # LSTM katmanı
         self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
             batch_first=True,
-            dropout=dropout,
-            bidirectional=True  # Çift yönlü LSTM kullan
+            dropout=self.dropout,
+            bidirectional=True
         )
         
         # Batch Normalization
-        self.batch_norm = nn.BatchNorm1d(hidden_size * 2)  # Çift yönlü LSTM için *2
+        self.batch_norm = nn.BatchNorm1d(
+            self.hidden_size * 2,
+            momentum=config['batch_norm']['momentum'],
+            eps=config['batch_norm']['eps']
+        )
         
-        # Dikkat mekanizması
+        # Attention mekanizması
+        attention_dims = config['attention']['dims']
         self.attention = nn.Sequential(
-            nn.Linear(hidden_size * 2, hidden_size),  # Çift yönlü LSTM için *2
+            nn.Linear(self.hidden_size * 2, attention_dims[0]),
+            nn.LayerNorm(attention_dims[0]),
             nn.ReLU(),
-            nn.Linear(hidden_size, 1)
+            nn.Dropout(config['attention']['dropout']),
+            nn.Linear(attention_dims[0], attention_dims[1]),
+            nn.Tanh(),
+            nn.Linear(attention_dims[1], attention_dims[2])
         )
         
-        # Gap ve seans bilgileri için özel katman
-        self.gap_session_layer = nn.Sequential(
-            nn.BatchNorm1d(5),  # Batch normalization ekle
-            nn.Linear(5, 8),
-            nn.ReLU(),
-            nn.Dropout(dropout/2)  # Daha az dropout
-        )
-        
-        # Çıkış katmanları
-        self.fc1 = nn.Linear(hidden_size * 2 + 8, hidden_size)  # Çift yönlü LSTM için *2
-        self.dropout = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(hidden_size, 1)
+        # Fully connected katmanlar
+        self.fc1 = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        self.fc_norm = nn.LayerNorm(self.hidden_size)
+        self.fc_dropout = nn.Dropout(self.dropout)
+        self.fc2 = nn.Linear(self.hidden_size, 1)
         
         # Modeli seçilen cihaza taşı
         self.to(self.device)
@@ -95,44 +86,29 @@ class LSTMPredictor(nn.Module):
         if x.shape[2] != self.input_size:
             raise ValueError(f"Giriş özellik sayısı {self.input_size} olmalıdır, alınan: {x.shape[2]}")
         
-        # Veriyi GPU'ya taşı (eğer kullanılabilirse)
+        # Veriyi GPU'ya taşı
         x = x.to(self.device)
         
-        try:
-            batch_size = x.size(0)
-            
-            # LSTM katmanı
-            lstm_out, _ = self.lstm(x)
-            
-            # Son zaman adımındaki çıktı
-            last_time_step = lstm_out[:, -1, :]
-            
-            # Batch normalization uygula
-            last_time_step = self.batch_norm(last_time_step)
-            
-            # Gap ve seans bilgilerini ayır ve işle
-            gap_session_features = x[:, -1, -5:]
-            gap_session_encoded = self.gap_session_layer(gap_session_features)
-            
-            # LSTM çıktısı ve gap/seans bilgilerini birleştir
-            combined = torch.cat((last_time_step, gap_session_encoded), dim=1)
-            
-            # Tam bağlantılı katmanlar
-            x = self.fc1(combined)
-            x = torch.relu(x)
-            x = self.dropout(x)
-            out = self.fc2(x)
-            
-            # Belleği temizle
-            del lstm_out, last_time_step, gap_session_features, gap_session_encoded, combined
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
-            return out
-            
-        except Exception as e:
-            logger.error(f"Forward pass sırasında hata: {str(e)}")
-            raise
+        # LSTM
+        lstm_out, _ = self.lstm(x)
         
+        # Batch norm
+        batch_norm_out = self.batch_norm(lstm_out.transpose(1, 2)).transpose(1, 2)
+        
+        # Attention
+        attention_weights = self.attention(batch_norm_out)
+        attention_weights = torch.softmax(attention_weights, dim=1)
+        context_vector = torch.sum(attention_weights * batch_norm_out, dim=1)
+        
+        # Fully connected
+        out = self.fc1(context_vector)
+        out = self.fc_norm(out)
+        out = F.relu(out)
+        out = self.fc_dropout(out)
+        out = self.fc2(out)
+        
+        return torch.sigmoid(out)
+    
     def train_model(self, train_sequences, train_targets, val_sequences=None, val_targets=None,
                    sample_weights=None, epochs=100, batch_size=32, learning_rate=0.001, patience=10, verbose=False):
         """
@@ -400,38 +376,43 @@ class LSTMPredictor(nn.Module):
             raise FileNotFoundError(f"Model dosyası bulunamadı: {filename}")
         
         try:
-            checkpoint = torch.load(filename)
+            # CPU'ya yükle
+            checkpoint = torch.load(filename, map_location='cpu')
             
             # Checkpoint içeriğini kontrol et
             if 'model_state_dict' not in checkpoint:
                 raise ValueError(f"Geçersiz model dosyası: 'model_state_dict' bulunamadı")
             
             # Parametre değerlerini kontrol et ve varsayılan değerler kullan
-            hidden_size = checkpoint.get('hidden_size', 128)
+            hidden_size = checkpoint.get('hidden_size', 256)
             num_layers = checkpoint.get('num_layers', 3)
-            input_size = checkpoint.get('input_size', 17)
-            dropout_rate = float(checkpoint.get('dropout', 0.3))  # dropout'u float'a çevir
-            
-            # Eksik parametreleri logla
-            if 'hidden_size' not in checkpoint or 'num_layers' not in checkpoint:
-                print(f"Uyarı: Model dosyasında bazı parametreler eksik. Varsayılan değerler kullanılıyor: hidden_size={hidden_size}, num_layers={num_layers}")
-            
-            if 'input_size' not in checkpoint:
-                print(f"Uyarı: Model dosyasında input_size parametresi bulunamadı. Varsayılan değer kullanılıyor: input_size={input_size}")
-            
-            if 'dropout' not in checkpoint:
-                print(f"Uyarı: Model dosyasında dropout parametresi bulunamadı. Varsayılan değer kullanılıyor: dropout={dropout_rate}")
+            input_size = checkpoint.get('input_size', 32)
+            dropout_rate = float(checkpoint.get('dropout', 0.3))
             
             # Yeni bir model oluştur
             model = LSTMPredictor(
-                input_size=input_size,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                dropout=dropout_rate
+                config={
+                    'lstm': {
+                        'input_size': input_size,
+                        'hidden_size': hidden_size,
+                        'num_layers': num_layers,
+                        'dropout': dropout_rate,
+                        'bidirectional': True
+                    },
+                    'batch_norm': {
+                        'momentum': 0.9,
+                        'eps': 1e-5
+                    },
+                    'attention': {
+                        'dims': [hidden_size * 2, 64, 1],
+                        'dropout': 0.1
+                    }
+                }
             )
             
             # Model durumunu yükle
             model.load_state_dict(checkpoint['model_state_dict'])
+            model.eval()
             
             print(f"Model başarıyla yüklendi: {filename}")
             logger.info(f"Model başarıyla yüklendi: {filename}")
@@ -440,4 +421,4 @@ class LSTMPredictor(nn.Module):
         except Exception as e:
             print(f"Model yüklenirken hata oluştu: {str(e)}")
             logger.error(f"Model yüklenirken hata oluştu: {str(e)}")
-            raise Exception(f"Model yüklenirken hata oluştu: {str(e)}") 
+            raise 

@@ -18,6 +18,11 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
   - Çift yönlü LSTM ve dikkat mekanizması
   - Batch normalization ve gelişmiş dropout
   - Otomatik CUDA/CPU optimizasyonu
+  - **Google Colab Entegrasyonu**: 
+    - Otomatik model eğitimi
+    - Veri senkronizasyonu
+    - Eğitim durumu takibi
+    - Model indirme/yükleme
 - **Gelişmiş Risk Yönetimi**: 
   - Her ticaret için maksimum %1 risk
   - Maksimum %5 günlük zarar limiti
@@ -46,6 +51,7 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
 - Python 3.8+
 - MetaTrader 5
 - CUDA uyumlu GPU (opsiyonel, performans için önerilir)
+- Google hesabı (Colab entegrasyonu için)
 - Gerekli Python kütüphaneleri (`requirements.txt` dosyasında listelenmiştir)
 
 ## 🛠️ Kurulum
@@ -68,7 +74,7 @@ source .venv/bin/activate  # Linux/Mac için
 pip install -r requirements.txt
 ```
 
-4. Yapılandırma dosyasını hazırlayın:
+4. Yapılandırma dosyalarını hazırlayın:
 ```bash
 copy .env.example .env    # Windows için
 cp .env.example .env     # Linux/Mac için
@@ -80,9 +86,25 @@ cp .env.example .env     # Linux/Mac için
    - MT5_SERVER: Broker sunucu adı
    - Diğer parametreleri isteğe bağlı olarak ayarlayın
 
-6. Gerekli dizinleri oluşturun:
+6. Google Cloud Console'dan API credentials oluşturun:
+   - Yeni bir proje oluşturun
+   - Google Drive API'yi etkinleştirin
+   - OAuth 2.0 credentials oluşturun
+   - İndirilen credentials dosyasını `config/credentials.json` olarak kaydedin
+
+7. Google Drive'da gerekli klasörleri oluşturun:
+   - `trading_bot` ana klasörü
+   - `models` alt klasörü (eğitilen modeller için)
+   - `data` alt klasörü (eğitim verileri için)
+
+8. `config/colab_config.json` dosyasını düzenleyin:
+   - `colab_notebook_id`: Colab notebook ID'si
+   - `drive_folders.models`: Models klasörü ID'si
+   - `drive_folders.data`: Data klasörü ID'si
+
+9. Gerekli dizinleri oluşturun:
 ```bash
-mkdir -p logs data saved_models
+mkdir -p logs data saved_models config notebooks
 ```
 
 ## 💻 Kullanım
@@ -98,8 +120,31 @@ Bot başlatıldığında:
 - MT5 bağlantısını kontrol eder
 - Sistem kaynaklarını izlemeye başlar
 - GPU kullanılabilirliğini kontrol eder
-- Modelleri yükler veya eğitir
+- Modelleri yükler veya eğitir (Colab entegrasyonu ile)
 - Gerçek zamanlı trading başlar
+
+## 🤖 Model Eğitimi
+
+Bot iki şekilde model eğitimi yapabilir:
+
+1. **Yerel Eğitim**:
+   - Düşük veri miktarı
+   - Hızlı eğitim
+   - Sistem kaynaklarını kullanır
+
+2. **Google Colab Eğitimi** (Önerilen):
+   - Yüksek veri miktarı
+   - GPU hızlandırma
+   - Sistem kaynaklarını kullanmaz
+   - Otomatik senkronizasyon
+   - İlerleme takibi
+
+Colab eğitimi seçildiğinde:
+1. MT5'ten veri çekilir
+2. Veri Google Drive'a yüklenir
+3. Colab'da eğitim başlatılır
+4. Eğitim durumu izlenir
+5. Model indirilir ve kullanıma hazır hale gelir
 
 ## ⚙️ Yapılandırma
 
@@ -108,13 +153,9 @@ Temel parametreler `.env` dosyasında ayarlanabilir:
 - Bağlantı bilgileri
 - Bildirim ayarları
 
-Gelişmiş parametreler `config.py` dosyasında bulunur:
-- Model parametreleri (LSTM ve RL)
-- Trading stratejisi ayarları
-- Sistem yapılandırması
-- Loglama ayarları
-- Bellek yönetimi limitleri
-- Batch boyutları ve optimizasyon ayarları
+Gelişmiş parametreler:
+- `config.py`: Model ve sistem parametreleri
+- `config/colab_config.json`: Colab entegrasyon ayarları
 
 ## 📊 İzleme ve Raporlama
 
@@ -138,6 +179,7 @@ Bot şu durumlarda otomatik olarak yeniden bağlanır:
 - Kritik hatalar oluştuğunda
 - NaN gradient değerleri tespit edildiğinde
 - Veri doğrulama hataları oluştuğunda
+- Colab bağlantısı kesildiğinde
 
 ## ⚠️ Risk Uyarısı
 
@@ -158,6 +200,8 @@ Sorun yaşarsanız:
 5. Model performans metriklerini inceleyin
 6. GPU kullanılabilirliğini kontrol edin
 7. Bellek kullanımı istatistiklerini gözden geçirin
+8. Google credentials'ın doğru olduğunu kontrol edin
+9. Drive klasör izinlerini kontrol edin
 
 ## 📝 Lisans
 

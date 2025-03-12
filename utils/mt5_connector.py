@@ -142,14 +142,13 @@ class MT5Connector:
             
         # Zaman dilimi çeviricisi
         tf_dict = {
-            "1m": mt5.TIMEFRAME_M1,
             "5m": mt5.TIMEFRAME_M5,
             "15m": mt5.TIMEFRAME_M15,
             "30m": mt5.TIMEFRAME_M30,
             "1h": mt5.TIMEFRAME_H1,
             "4h": mt5.TIMEFRAME_H4,
-            "1d": mt5.TIMEFRAME_D1,
-            "1w": mt5.TIMEFRAME_W1,
+            "D1": mt5.TIMEFRAME_D1,
+            "1W": mt5.TIMEFRAME_W1,
             "1M": mt5.TIMEFRAME_MN1
         }
         
@@ -577,4 +576,31 @@ class MT5Connector:
                 
         except Exception as e:
             print(f"Pozisyon kapatılırken hata: {str(e)}")
-            return False 
+            return False
+
+    def _get_mt5_timeframe(self, timeframe: str) -> int:
+        """
+        String olarak verilen zaman dilimini MT5 timeframe'ine çevirir
+        
+        Parametreler:
+        - timeframe: Zaman dilimi (ör. "1h", "4h", "1d")
+        
+        Dönüş:
+        - MT5 timeframe sabiti
+        """
+        timeframe_map = {
+            "5m": mt5.TIMEFRAME_M5,
+            "15m": mt5.TIMEFRAME_M15,
+            "30m": mt5.TIMEFRAME_M30,
+            "1h": mt5.TIMEFRAME_H1,
+            "4h": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1,
+            "1W": mt5.TIMEFRAME_W1,
+            "1M": mt5.TIMEFRAME_MN1
+        }
+        
+        if timeframe not in timeframe_map:
+            print(f"Geçersiz zaman dilimi: {timeframe}. Desteklenen değerler: {list(timeframe_map.keys())}")
+            return None
+        
+        return timeframe_map[timeframe] 

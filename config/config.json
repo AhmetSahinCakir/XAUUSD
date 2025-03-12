@@ -1,0 +1,16 @@
+{
+    "MODEL": {
+        "sequence_length": 60,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "dropout": 0.2,
+        "learning_rate": 0.001,
+        "batch_size": 32,
+        "epochs": 100
+    },
+    "TRAINING": {
+        "validation_split": 0.2,
+        "early_stopping_patience": 10,
+        "min_delta": 0.001
+    }
+} 

@@ -868,3 +868,123 @@ class DataProcessor:
                 logger.debug(f"Eksik sütun eklendi: {col}")
         
         return df
+
+    def prepare_rl_state(self, df, account_info=None):
+        """
+        RL modeli için durum temsili oluşturur.
+        ForexTradingEnv ile uyumlu 15 boyutlu bir state vektörü oluşturur.
+        
+        Parametreler:
+        - df: İşlenecek DataFrame veya Series (teknik göstergeler eklenmiş olmalı)
+        - account_info: Hesap durumu bilgileri (opsiyonel)
+            - balance: Mevcut bakiye
+            - initial_balance: Başlangıç bakiyesi
+            - position: Mevcut pozisyon (-1: satış, 0: bekle, 1: alış)
+            - last_trade_price: Son işlem fiyatı
+        
+        Dönüş:
+        - numpy array: 15 boyutlu RL state vektörü
+            - [0-4]: Fiyat verileri (open, high, low, close, tick_volume)
+            - [5-11]: Teknik göstergeler (RSI, MACD, Signal_Line, ATR, Upper_Band, Lower_Band, MA20)
+            - [12-14]: Hesap durumu (normalized_balance, position, last_trade_price_ratio)
+        """
+        try:
+            if df is None:
+                logger.error("prepare_rl_state'e None değeri gönderildi")
+                return None
+            
+            # DataFrame veya Series kontrolü ve teknik göstergelerin eklenmesi
+            if isinstance(df, pd.Series):
+                # Series'i DataFrame'e çevir
+                df_temp = pd.DataFrame([df])
+                # Teknik göstergeleri ekle
+                df_temp = self.add_technical_indicators(df_temp)
+                if df_temp is None:
+                    return None
+                current_data = df_temp.iloc[0]
+            else:
+                if len(df) == 0:
+                    logger.error("prepare_rl_state'e boş DataFrame gönderildi")
+                    return None
+                # Teknik göstergeleri ekle
+                df = self.add_technical_indicators(df)
+                if df is None:
+                    return None
+                current_data = df.iloc[-1]
+            
+            # Gerekli özelliklerin varlığını kontrol et
+            required_features = ['open', 'high', 'low', 'close', 'tick_volume',
+                               'RSI', 'MACD', 'Signal_Line', 'ATR',
+                               'Upper_Band', 'Lower_Band', 'MA20']
+            
+            missing_features = [feat for feat in required_features if feat not in current_data.index]
+            if missing_features:
+                logger.error(f"Eksik özellikler: {missing_features}")
+                return None
+            
+            # 1. Fiyat verileri (5 özellik)
+            price_data = np.array([
+                current_data['open'],
+                current_data['high'],
+                current_data['low'],
+                current_data['close'],
+                current_data['tick_volume']
+            ])
+            
+            # 2. Teknik göstergeler (7 özellik)
+            technical_indicators = np.array([
+                current_data['RSI'],
+                current_data['MACD'],
+                current_data['Signal_Line'],
+                current_data['ATR'],
+                current_data['Upper_Band'],
+                current_data['Lower_Band'],
+                current_data['MA20']
+            ])
+            
+            # 3. Hesap durumu (3 özellik)
+            if account_info is None:
+                account_state = np.array([0.0, 0.0, 0.0])  # Varsayılan değerler
+            else:
+                account_state = np.array([
+                    account_info.get('balance', 0.0) / account_info.get('initial_balance', 1.0),
+                    account_info.get('position', 0.0),
+                    account_info.get('last_trade_price', 0.0) / current_data['close'] if account_info.get('last_trade_price', 0.0) > 0 else 0.0
+                ])
+            
+            # Güvenli normalizasyon fonksiyonu
+            def safe_normalize(data):
+                if len(data) == 0:
+                    return data
+                data_mean = np.mean(data)
+                if abs(data_mean) < 1e-8:  # Sıfıra çok yakın
+                    return data - np.mean(data)  # Sadece merkezle
+                return (data - data_mean) / (np.std(data) + 1e-8)  # Standart sapma ile normalize et
+            
+            # Verileri normalize et
+            normalized_price = safe_normalize(price_data)
+            normalized_tech = safe_normalize(technical_indicators)
+            
+            # Tüm özellikleri birleştir
+            state_array = np.concatenate([
+                normalized_price,     # 5 özellik
+                normalized_tech,      # 7 özellik
+                account_state        # 3 özellik
+            ]).astype(np.float32)
+            
+            # NaN ve sonsuz değerleri kontrol et
+            if np.any(np.isnan(state_array)) or np.any(np.isinf(state_array)):
+                logger.warning("State vektöründe NaN veya sonsuz değerler var. Temizleniyor...")
+                state_array = np.nan_to_num(state_array, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+            # State vektörünü -1 ile 1 arasına normalize et
+            state_array = np.clip(state_array, -1, 1)
+            
+            logger.debug(f"RL state vektörü oluşturuldu. Boyut: {state_array.shape}")
+            return state_array
+            
+        except Exception as e:
+            logger.error(f"RL state hazırlanırken hata: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None

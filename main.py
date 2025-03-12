@@ -91,10 +91,40 @@ class XAUUSDTradingBot:
             
             logger.info("Initializing XAUUSD Trading Bot...")
             
-            # Connect to MT5
-            if hasattr(self, 'mt5') and self.mt5 is not None and hasattr(self.mt5, 'connected') and self.mt5.connected:
-                print("MT5 zaten bağlı!")
-            else:
+            # Debug modu için kullanıcıya sor
+            debug_mode = input("\n==================================================\nBaşlangıç testlerini çalıştırmak ister misiniz? (y/n): ").strip().lower() == 'y'
+            print("==================================================")
+            
+            if debug_mode:
+                from data_debug import DataDebugger
+                debugger = DataDebugger(mt5_connector=self.mt5)  # Pass existing MT5 connector if available
+                results = debugger.run_all_tests()
+                
+                if not results.get('tests', {}).get('mt5_connection', {}).get('success', False):
+                    raise ConnectionError("MT5 bağlantı testi başarısız oldu. Lütfen MT5'in çalıştığından emin olun.")
+                
+                # Diğer test sonuçlarını kontrol et
+                failed_timeframes = []
+                timeframes_results = results.get('tests', {}).get('timeframes', {})
+                for timeframe in timeframes_results:
+                    timeframe_results = timeframes_results[timeframe]
+                    if not all([
+                        timeframe_results.get('data_retrieval', {}).get('success', False),
+                        timeframe_results.get('technical_indicators', {}).get('success', False)
+                        # RL state is optional for now
+                    ]):
+                        failed_timeframes.append(timeframe)
+                
+                if failed_timeframes:
+                    logger.warning(f"Bazı testler başarısız oldu: {failed_timeframes}")
+                    continue_anyway = input("\n==================================================\nBazı testler başarısız oldu. Devam etmek istiyor musunuz? (y/n): ").strip().lower() == 'y'
+                    print("==================================================")
+                    
+                    if not continue_anyway:
+                        raise Exception("Kullanıcı isteği ile program sonlandırıldı.")
+            
+            # Connect to MT5 (if not already connected through debugger)
+            if not hasattr(self, 'mt5') or self.mt5 is None or not self.mt5.connected:
                 print("\n==================================================")
                 print("ℹ️ MetaTrader 5'e bağlanılıyor...")
                 print("==================================================")

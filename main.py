@@ -222,6 +222,9 @@ class XAUUSDTradingBot:
                     else:
                         print_error("Model eğitimi başarısız! Bot çalışamaz.")
                         raise Exception("Model eğitimi başarısız! Bot çalışamaz.")
+                
+                # Eğitim tamamlandıktan sonra clear_existing_models'i False yap
+                self.clear_existing_models = False
             else:
                 # Mevcut modelleri yükle
                 if not self.load_or_create_models():
@@ -476,6 +479,8 @@ class XAUUSDTradingBot:
                 print_info("Lütfen hata mesajlarını kontrol edin ve tekrar deneyin.")
                 print_info("Alternatif olarak yerel eğitimi deneyebilirsiniz.")
                 return False
+            # Eğitim tamamlandıktan sonra clear_existing_models'i False yap
+            self.clear_existing_models = False
             return True
         else:
             print_section("YEREL EĞİTİM SEÇİLDİ")
@@ -652,12 +657,9 @@ class XAUUSDTradingBot:
                 
             print_section("EĞİTİM TAMAMLANDI")
             print_success(f"Toplam {successful_models} model başarıyla eğitildi!")
-            
-            if successful_models < len(self.timeframes):
-                print_warning(f"{len(self.timeframes) - successful_models} model eğitilemedi.")
-                print_info("Bot kısmi işlevsellikle çalışabilir.")
-            
-            return True
+            # Eğitim tamamlandıktan sonra clear_existing_models'i False yap
+            self.clear_existing_models = False
+            return successful_models > 0
             
         except Exception as e:
             logger.error(f"Yerel eğitim hatası: {str(e)}")

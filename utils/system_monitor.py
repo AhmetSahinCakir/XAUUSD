@@ -125,4 +125,41 @@ class SystemMonitor:
                                         time.localtime(self.last_gc_time)),
             'last_heartbeat': time.strftime('%Y-%m-%d %H:%M:%S', 
                                           time.localtime(self.last_heartbeat_time))
-        } 
+        }
+        
+    def check_status(self):
+        """Sistemin genel durumunu kontrol et
+        
+        Dönüş:
+        - True: Sistem normal çalışıyor
+        - False: Kritik bir sorun var
+        """
+        try:
+            # MT5 bağlantısını kontrol et
+            if not self.mt5.connected:
+                logger.error("MT5 bağlantısı koptu!")
+                return False
+                
+            # Bellek kullanımını kontrol et
+            memory_percent = psutil.Process().memory_percent()
+            if memory_percent > 95:  # %95'ten fazla bellek kullanımı kritik
+                logger.error(f"Kritik bellek kullanımı: %{memory_percent:.1f}")
+                return False
+                
+            # CPU kullanımını kontrol et
+            cpu_percent = psutil.cpu_percent(interval=0.5)
+            if cpu_percent > 95:  # %95'ten fazla CPU kullanımı kritik
+                logger.error(f"Kritik CPU kullanımı: %{cpu_percent:.1f}")
+                return False
+                
+            # Disk kullanımını kontrol et
+            disk = psutil.disk_usage('/')
+            if disk.percent > 95:  # %95'ten fazla disk kullanımı kritik
+                logger.error(f"Kritik disk kullanımı: %{disk.percent:.1f}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Sistem durumu kontrolü sırasında hata: {str(e)}")
+            return False 

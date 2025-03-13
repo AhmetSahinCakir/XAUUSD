@@ -18,7 +18,9 @@ logger = logging.getLogger("TradingBot.ColabManager")
 class ColabManager:
     def __init__(self, config_path='config/colab_config.json'):
         """Initialize Colab Manager"""
-        self.config_path = config_path
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.config_dir = os.path.join(self.base_dir, 'config')
+        self.config_path = os.path.join(self.base_dir, config_path)
         self.credentials = None
         self.drive_service = None
         self.colab_notebook_id = None
@@ -109,8 +111,9 @@ class ColabManager:
             creds = None
             
             # Token dosyasını oku
-            if os.path.exists('config/token.json'):
-                token_data = self._read_json_file('config/token.json', "Token")
+            token_path = os.path.join(self.config_dir, 'token.json')
+            if os.path.exists(token_path):
+                token_data = self._read_json_file(token_path, "Token")
                 if token_data and self._validate_credentials(token_data):
                     try:
                         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
@@ -131,18 +134,19 @@ class ColabManager:
                         creds = None
                 else:
                     # Credentials dosyasını oku
-                    creds_data = self._read_json_file('config/credentials.json', "Credentials")
+                    credentials_path = os.path.join(self.config_dir, 'credentials.json')
+                    creds_data = self._read_json_file(credentials_path, "Credentials")
                     if not creds_data or not self._validate_credentials(creds_data):
                         raise Exception("[HATA] Geçerli credentials.json dosyası bulunamadı")
                         
                     try:
                         flow = InstalledAppFlow.from_client_secrets_file(
-                            'config/credentials.json', SCOPES)
+                            credentials_path, SCOPES)
                         creds = flow.run_local_server(port=0)
                         logger.info("[BASARILI] Yeni token oluşturuldu")
                         
                         # Yeni token'ı kaydet
-                        token_path = 'config/token.json'
+                        token_path = os.path.join(self.config_dir, 'token.json')
                         os.makedirs(os.path.dirname(token_path), exist_ok=True)
                         
                         token_data = {
@@ -182,9 +186,32 @@ class ColabManager:
             # Drive'a yükle
             logger.info("[BILGI] Veri dosyası Drive'a yükleniyor: " + file_name)
             
-            # Yükleme başarılı
-            logger.info("[BASARILI] Veri dosyası Drive'a yüklendi: " + file_name)
-            return True
+            file_metadata = {
+                'name': os.path.basename(file_name),
+                'parents': [self.config['drive_folders']['data']]
+            }
+            
+            media = MediaFileUpload(file_name, resumable=True)
+            file = self.drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            
+            # Dosyanın başarıyla yüklenip yüklenmediğini kontrol et
+            uploaded_file_id = file.get('id')
+            if not uploaded_file_id:
+                logger.error("[HATA] Dosya yüklendi ancak ID alınamadı")
+                return False
+                
+            # Drive'da dosyanın varlığını kontrol et
+            try:
+                self.drive_service.files().get(fileId=uploaded_file_id).execute()
+                logger.info("[BASARILI] Veri dosyası Drive'a yüklendi ve doğrulandı: " + file_name)
+                return True
+            except Exception as e:
+                logger.error(f"[HATA] Dosya yüklendi ancak doğrulanamadı: {str(e)}")
+                return False
             
         except Exception as e:
             logger.error(f"[HATA] Drive'a yükleme hatası: {str(e)}")
@@ -193,10 +220,16 @@ class ColabManager:
     def start_colab_training(self):
         """Colab'da eğitimi başlat"""
         try:
-            self.logger.info("[BILGI] Colab'da eğitim başlatılıyor...")
+            logger.info("[BILGI] Colab'da eğitim başlatılıyor...")
             
+            # Trading bot klasörünü ara
+            trading_bot_folder_id = self.config['drive_folders'].get('trading_bot')
+            if not trading_bot_folder_id:
+                logger.error("Trading bot klasör ID'si bulunamadı!")
+                raise Exception("Trading bot klasör ID'si eksik!")
+
             # Drive'da notebook'u ara
-            query = f"name = 'train_models.ipynb' and trashed = false"
+            query = f"name = '{self.config['notebook']['name']}' and '{trading_bot_folder_id}' in parents and trashed = false"
             results = self.drive_service.files().list(
                 q=query,
                 spaces='drive',
@@ -207,14 +240,14 @@ class ColabManager:
             
             items = results.get('files', [])
             if not items:
-                self.logger.error("""
+                logger.error("""
 Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
-1. 'train_models.ipynb' dosyası Google Drive'ınızda mevcut mu?
+1. 'train_models.ipynb' dosyası Google Drive'ınızda trading_bot klasöründe mevcut mu?
 2. config/colab_config.json dosyasındaki ID'ler doğru mu?
 3. Google Drive API izinleri doğru ayarlanmış mı?
 
 Çözüm için:
-1. Örnek Colab notebook'u Drive'ınıza yükleyin
+1. Örnek Colab notebook'u Drive'ınızdaki trading_bot klasörüne yükleyin
 2. colab_config.json dosyasını güncelleyin
 3. Google Cloud Console'dan API izinlerini kontrol edin""")
                 raise Exception("Colab eğitimi başlatma hatası!")
@@ -226,12 +259,12 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
             status_data = {
                 'status': 'started',
                 'start_time': datetime.now().isoformat(),
-                'model_folder_id': self.config['drive_folders']['models'],
-                'data_folder_id': self.config['drive_folders']['data']
+                'model_folder_id': trading_bot_folder_id,  # Artık trading_bot klasörünü kullan
+                'data_folder_id': trading_bot_folder_id    # Artık trading_bot klasörünü kullan
             }
             
-            # Status dosyasını ara
-            query = f"name = '{self.config['model_files']['status']}' and trashed = false"
+            # Status dosyasını ara (trading_bot klasörü içinde)
+            query = f"name = '{self.config['model_files']['status']}' and '{trading_bot_folder_id}' in parents and trashed = false"
             results = self.drive_service.files().list(
                 q=query,
                 spaces='drive',
@@ -257,10 +290,10 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
                     media_body=media
                 ).execute()
             else:
-                # Yeni dosya oluştur
+                # Yeni dosya oluştur (trading_bot klasörü içinde)
                 file_metadata = {
                     'name': self.config['model_files']['status'],
-                    'parents': [self.config['drive_folders']['models']]
+                    'parents': [trading_bot_folder_id]  # trading_bot klasörüne kaydet
                 }
                 media = MediaIoBaseUpload(
                     io.BytesIO(json.dumps(status_data).encode()),
@@ -273,20 +306,27 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
                     fields='id'
                 ).execute()
             
-            self.logger.info("[BASARILI] Colab eğitimi başlatıldı!")
+            logger.info("[BASARILI] Colab eğitimi başlatıldı!")
             return True
             
         except Exception as e:
-            self.logger.error(f"[HATA] Colab eğitim hatası: {str(e)}")
+            logger.error(f"[HATA] Colab eğitim hatası: {str(e)}")
             return False
             
     def download_model(self, model_name='lstm_model.pth', save_path='saved_models/'):
         """Download trained model from Drive"""
         try:
-            # Model dosyasını bul
+            trading_bot_folder_id = self.config['drive_folders'].get('trading_bot')
+            if not trading_bot_folder_id:
+                logger.error("Trading bot klasör ID'si bulunamadı!")
+                return False
+
+            # Model dosyasını trading_bot klasöründe ara
             results = self.drive_service.files().list(
-                q=f"name='{model_name}' and '{self.model_folder_id}' in parents",
-                fields="files(id, name, modifiedTime)"
+                q=f"name='{model_name}' and '{trading_bot_folder_id}' in parents and trashed = false",
+                fields="files(id, name, modifiedTime)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
             ).execute()
             
             files = results.get('files', [])
@@ -322,10 +362,17 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
     def check_training_status(self):
         """Check if model training is complete"""
         try:
-            # Status dosyasını kontrol et
+            trading_bot_folder_id = self.config['drive_folders'].get('trading_bot')
+            if not trading_bot_folder_id:
+                logger.error("Trading bot klasör ID'si bulunamadı!")
+                return False
+
+            # Status dosyasını trading_bot klasöründe kontrol et
             results = self.drive_service.files().list(
-                q=f"name='training_status.json' and '{self.model_folder_id}' in parents",
-                fields="files(id, name)"
+                q=f"name='training_status.json' and '{trading_bot_folder_id}' in parents and trashed = false",
+                fields="files(id, name)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
             ).execute()
             
             files = results.get('files', [])
@@ -365,14 +412,217 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
     def _setup_colab_config(self):
         """Colab konfigürasyonunu yükle"""
         try:
-            config_data = self._read_json_file(self.config_path, "Colab Config")
-            if config_data:
-                self.colab_notebook_id = config_data.get('colab_notebook_id')
-                self.model_folder_id = config_data.get('model_folder_id')
-                self.data_folder_id = config_data.get('data_folder_id')
-                # Colab URL'ini oluştur
-                self.colab_url = f"https://colab.research.google.com/drive/{self.colab_notebook_id}"
-                logger.info("[BILGI] Colab konfigürasyonu başarıyla yüklendi")
+            self.config = self._read_json_file(self.config_path, "Colab Config")
+            if not self.config:
+                raise Exception("Colab konfigürasyonu yüklenemedi!")
+
+            # Klasörleri kontrol et ve gerekirse oluştur
+            self._setup_drive_folders()
+            
+            # Colab notebook'u kontrol et ve yükle
+            notebook_info = self._setup_colab_notebook()
+            if notebook_info:
+                self.config['colab_notebook_id'] = notebook_info['id']
+                # Konfigürasyonu güncelle
+                with open(self.config_path, 'w') as f:
+                    json.dump(self.config, f, indent=4)
+
+            self.colab_notebook_id = self.config.get('colab_notebook_id')
+            self.model_folder_id = self.config.get('drive_folders', {}).get('models')
+            self.data_folder_id = self.config.get('drive_folders', {}).get('data')
+            # Colab URL'ini oluştur
+            self.colab_url = f"https://colab.research.google.com/drive/{self.colab_notebook_id}"
+            logger.info("[BILGI] Colab konfigürasyonu başarıyla yüklendi")
         except Exception as e:
             logger.error(f"[HATA] Colab konfigürasyonu yüklenirken hata: {str(e)}")
-            raise 
+            raise
+
+    def _setup_colab_notebook(self):
+        """Colab notebook'u kontrol et ve gerekirse yükle"""
+        try:
+            print("\n==================================================")
+            print("COLAB NOTEBOOK KONTROLÜ")
+            print("==================================================")
+            
+            # Önce mevcut notebook'u kontrol et ve sil
+            if self.config.get('colab_notebook_id'):
+                try:
+                    self.drive_service.files().delete(
+                        fileId=self.config['colab_notebook_id']
+                    ).execute()
+                    print("ℹ Eski notebook silindi")
+                except Exception:
+                    print("ℹ Eski notebook zaten silinmiş")
+            
+            # trading_bot klasör ID'sini al
+            trading_bot_id = self.config.get('drive_folders', {}).get('trading_bot')
+            if not trading_bot_id:
+                raise Exception("trading_bot klasör ID'si bulunamadı")
+            
+            print("ℹ Yerel notebook dosyası kontrol ediliyor...")
+            
+            # Yerel notebook dosyasını kontrol et
+            notebook_path = os.path.join(self.base_dir, 'notebooks', 'train_lstm.ipynb')
+            if not os.path.exists(notebook_path):
+                print("❌ Yerel notebook dosyası bulunamadı!")
+                print("\nÖnerilen çözümler:")
+                print("1. notebooks/train_lstm.ipynb dosyasının varlığını kontrol edin")
+                print("2. Projeyi GitHub'dan yeniden klonlayın")
+                raise Exception("Notebook dosyası bulunamadı")
+            
+            print("✓ Yerel notebook dosyası bulundu")
+            print("ℹ Notebook Drive'a yükleniyor...")
+            
+            # Notebook'u Drive'a yükle
+            file_metadata = {
+                'name': 'train_lstm.ipynb',
+                'parents': [trading_bot_id],
+                'mimeType': 'application/vnd.google.colab'
+            }
+            
+            media = MediaFileUpload(
+                notebook_path,
+                mimetype='application/json',
+                resumable=True
+            )
+            
+            file = self.drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, name',
+                supportsAllDrives=True
+            ).execute()
+            
+            print(f"✅ Notebook başarıyla yüklendi (ID: {file['id']})")
+            print(f"ℹ Colab URL: https://colab.research.google.com/drive/{file['id']}")
+            
+            return file
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\n❌ Notebook yükleme hatası: {error_msg}")
+            print("\nÖnerilen çözümler:")
+            print("1. İnternet bağlantınızı kontrol edin")
+            print("2. Google Drive API izinlerini kontrol edin")
+            print("3. Drive'da yeterli alan olduğundan emin olun")
+            logger.error(f"[HATA] Notebook yükleme hatası: {str(e)}")
+            return None
+
+    def _setup_drive_folders(self):
+        """Drive'da gerekli klasörleri kontrol et ve oluştur"""
+        try:
+            print("\n==================================================")
+            print("GOOGLE DRIVE KLASÖR KONTROLÜ")
+            print("==================================================")
+            print("Drive'daki klasörler kontrol ediliyor...")
+            
+            # Ana klasörü kontrol et/oluştur
+            trading_bot_folder = self._get_or_create_folder('trading_bot')
+            if not trading_bot_folder:
+                print("❌ trading_bot klasörü oluşturulamadı!")
+                print("\nÖnerilen çözümler:")
+                print("1. Google Drive API izinlerinizi kontrol edin")
+                print("2. Drive'da yeterli alan olduğundan emin olun")
+                print("3. İnternet bağlantınızı kontrol edin")
+                raise Exception("trading_bot klasörü oluşturulamadı!")
+            
+            # Alt klasörleri oluştur
+            data_folder = self._get_or_create_folder('data', parent_id=trading_bot_folder['id'])
+            if not data_folder:
+                print("❌ data klasörü oluşturulamadı!")
+                raise Exception("data klasörü oluşturulamadı!")
+                
+            models_folder = self._get_or_create_folder('models', parent_id=trading_bot_folder['id'])
+            if not models_folder:
+                print("❌ models klasörü oluşturulamadı!")
+                raise Exception("models klasörü oluşturulamadı!")
+            
+            # Klasör ID'lerini güncelle
+            self.config['drive_folders'] = {
+                'root': trading_bot_folder['id'],
+                'models': models_folder['id'],
+                'data': data_folder['id'],
+                'trading_bot': trading_bot_folder['id']
+            }
+            
+            # Konfigürasyonu kaydet
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=4)
+                
+            print("\nKlasör yapısı:")
+            print(f"└── trading_bot/ (ID: {trading_bot_folder['id']})")
+            print(f"    ├── data/     (ID: {data_folder['id']})")
+            print(f"    └── models/   (ID: {models_folder['id']})")
+            print("\n✅ Drive klasörleri hazır!")
+            
+            logger.info("[BILGI] Drive klasörleri başarıyla oluşturuldu/güncellendi")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[HATA] Drive klasörleri oluşturulurken hata: {str(e)}")
+            return False
+            
+    def _get_or_create_folder(self, folder_name, parent_id=None):
+        """Drive'da klasör kontrol et veya oluştur"""
+        try:
+            # Önce klasörü ara
+            query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+            if parent_id:
+                query += f" and '{parent_id}' in parents"
+            query += " and trashed=false"
+            
+            results = self.drive_service.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)',
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            files = results.get('files', [])
+            
+            # Klasör varsa
+            if files:
+                print(f"✓ {folder_name}/ klasörü bulundu (ID: {files[0]['id']})")
+                logger.info(f"[BILGI] {folder_name} klasörü bulundu (ID: {files[0]['id']})")
+                return files[0]
+            
+            # Klasör yoksa oluştur
+            print(f"ℹ {folder_name}/ klasörü bulunamadı, oluşturuluyor...")
+            
+            folder_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            
+            if parent_id:
+                folder_metadata['parents'] = [parent_id]
+            
+            folder = self.drive_service.files().create(
+                body=folder_metadata,
+                fields='id, name',
+                supportsAllDrives=True
+            ).execute()
+            
+            print(f"✅ {folder_name}/ klasörü oluşturuldu (ID: {folder['id']})")
+            logger.info(f"[BILGI] {folder_name} klasörü oluşturuldu (ID: {folder['id']})")
+            return folder
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "insufficientFilePermissions" in error_msg:
+                print(f"\n❌ {folder_name}/ klasörü için yetki hatası!")
+                print("\nÖnerilen çözümler:")
+                print("1. Google Cloud Console'da Drive API'yi etkinleştirin")
+                print("2. OAuth onay ekranını yapılandırın")
+                print("3. credentials.json dosyasını yeniden indirin")
+            elif "dailyLimitExceeded" in error_msg:
+                print(f"\n❌ {folder_name}/ klasörü için API limit hatası!")
+                print("\nÖnerilen çözümler:")
+                print("1. Birkaç dakika bekleyip tekrar deneyin")
+                print("2. Google Cloud Console'dan API limitlerini kontrol edin")
+            else:
+                print(f"\n❌ {folder_name}/ klasörü oluşturulurken hata: {error_msg}")
+            
+            logger.error(f"[HATA] {folder_name} klasörü oluşturulurken hata: {str(e)}")
+            return None 

@@ -67,7 +67,7 @@ class DataProcessor:
         logger.info(f"DataProcessor başlatıldı. Toplam özellik sayısı: {self.n_features}")
         
         # Scaler'lar
-        self.feature_scaler = None
+        self.feature_scaler = MinMaxScaler()
         self.feature_scaler_fitted = False
         
         self.feature_columns = ['open', 'high', 'low', 'close', 'tick_volume']
@@ -156,13 +156,20 @@ class DataProcessor:
             # Önemli gap'leri loglama
             if df['gap'].sum() > 0:
                 significant_gaps = df[df['gap'] == 1]
+                max_gap_size = significant_gaps['gap_size'].max()
+                
+                # Tüm gap bilgilerini sadece debug seviyesinde logla
+                logger.debug(f"Veri setinde {len(significant_gaps)} adet piyasa boşluğu (gap) tespit edildi")
+                logger.debug(f"En büyük boşluk: {significant_gaps['time_diff'].max():.1f} dakika")
+                
+                # Detaylı gap bilgilerini sadece debug seviyesinde logla
                 for idx, row in significant_gaps.iterrows():
                     gap_time = row['time']
                     gap_size = row['gap_size']
                     if gap_size > 2:  # Büyük gap: ATR'nin 2 katından fazla
-                        logger.warning(f"Büyük fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
+                        logger.debug(f"Büyük fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
                     elif gap_size > 1:  # Anlamlı gap: ATR'nin 1-2 katı arası
-                        logger.info(f"Anlamlı fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
+                        logger.debug(f"Anlamlı fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
                     else:  # Küçük gap: ATR'nin 0.5-1 katı arası
                         logger.debug(f"Küçük fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
             
@@ -318,8 +325,8 @@ class DataProcessor:
                     gaps = df[df['time_diff'] > time_diff_mode * 3]
                     
                     if not gaps.empty:
-                        logger.warning(f"Veri setinde {len(gaps)} adet piyasa boşluğu (gap) tespit edildi")
-                        logger.warning(f"En büyük boşluk: {gaps['time_diff'].max()} dakika")
+                        logger.debug(f"Veri setinde {len(gaps)} adet piyasa boşluğu (gap) tespit edildi")
+                        logger.debug(f"En büyük boşluk: {gaps['time_diff'].max()} dakika")
                 
                 # Geçici sütunu kaldır
                 if 'time_diff' in df.columns:
@@ -855,7 +862,7 @@ class DataProcessor:
                 gap_size = df.iloc[-1]['gap_size'] if 'gap_size' in df.columns else 0
                 
                 if gap_present > 0:
-                    logger.info(f"Tahmin verisi hazırlanırken fiyat boşluğu (gap) tespit edildi. Büyüklük: {gap_size:.2f} ATR")
+                    logger.debug(f"Tahmin verisi hazırlanırken fiyat boşluğu (gap) tespit edildi. Büyüklük: {gap_size:.2f} ATR")
                 
                 # Hangi seansta olduğumuzu logla
                 if 'session_asian' in df.columns and df.iloc[-1]['session_asian'] > 0:

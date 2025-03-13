@@ -1,8 +1,10 @@
 {
-    "colab_notebook_id": "1ZM5vTURtoRBAjpZiBgymZ7PLEivFjK",
+    "colab_notebook_id": "15wEeQQamHSBYcLXpDj_-aC_GA2Kd5RpH",
     "drive_folders": {
-        "models": "1ZM5vTURtoRBAjpZiBgymZ7PLEivFjK",
-        "data": "1ZM5vTURtoRBAjpZiBgymZ7PLEivFjK"
+        "root": "1o8lVnZHv2Eojh1brYv43nDFMfItP8mZ0",
+        "models": "1r9BMJR-GBUMZ23Mj1PYUbm9aj20K5qUy",
+        "data": "1DhtH6ZZOPmMlRtrTULHOAnfNxFcGez9Q",
+        "trading_bot": "1o8lVnZHv2Eojh1brYv43nDFMfItP8mZ0"
     },
     "training": {
         "timeout_seconds": 7200,
@@ -12,5 +14,9 @@
     "model_files": {
         "lstm": "lstm_model.pth",
         "status": "training_status.json"
+    },
+    "notebook": {
+        "name": "train_lstm.ipynb",
+        "folder": "trading_bot"
     }
-} 
+}

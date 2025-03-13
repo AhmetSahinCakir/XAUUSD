@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 import os
 import logging
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import torch.nn.functional as F
 
 logger = logging.getLogger("TradingBot.LSTMModel")
@@ -172,7 +172,7 @@ class LSTMPredictor(nn.Module):
         
         try:
             # Eğitim döngüsü
-            pbar = tqdm(range(epochs), desc="Eğitim", disable=not verbose)
+            pbar = tqdm(range(epochs), desc="Eğitim", disable=not verbose, position=0, leave=True)
             for epoch in pbar:
                 # Bellek temizliği
                 if torch.cuda.is_available():
@@ -189,6 +189,7 @@ class LSTMPredictor(nn.Module):
                 batch_pbar = tqdm(range(0, train_sequences.shape[0], batch_size),
                                 desc=f"Epoch {epoch+1}/{epochs}",
                                 leave=False,
+                                position=1,
                                 disable=not verbose)
                 
                 for i in batch_pbar:

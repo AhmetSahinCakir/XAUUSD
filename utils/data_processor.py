@@ -1093,3 +1093,35 @@ class DataProcessor:
         except Exception as e:
             logger.error(f"Veri işleme hatası: {str(e)}")
             return None
+
+    def get_latest_data(self, lookback_periods=1000):
+        """Son verileri alır ve RL modeli için hazırlar
+        
+        Args:
+            lookback_periods (int): Alınacak geçmiş veri sayısı
+            
+        Returns:
+            pd.DataFrame: İşlenmiş veri
+        """
+        try:
+            # MT5'ten veri al
+            data = self.mt5_connector.get_historical_data(
+                symbol="XAUUSD",
+                timeframe="5m",
+                num_candles=lookback_periods
+            )
+            
+            if data is None or len(data) < lookback_periods:
+                raise Exception(f"Yeterli veri alınamadı: {len(data) if data is not None else 0}/{lookback_periods}")
+            
+            # Teknik göstergeleri ekle
+            processed_data = self.add_technical_indicators(data)
+            
+            # NaN değerleri temizle
+            processed_data = processed_data.dropna()
+            
+            return processed_data
+            
+        except Exception as e:
+            logger.error(f"Veri alma hatası: {str(e)}")
+            return pd.DataFrame()

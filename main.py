@@ -239,14 +239,28 @@ class XAUUSDTradingBot:
             
             # RL Trader'ı başlat
             try:
+                # Veri hazırlığı
+                initial_data = self.data_processor.get_latest_data()
+                env_params = {
+                    'df': initial_data,
+                    'window_size': MODEL_CONFIG['rl']['window_size'],
+                    'initial_balance': self.risk_manager.initial_balance,
+                    'commission': TRADING_CONFIG['commission']
+                }
+                
+                # LSTM modelini al
+                lstm_model = self.lstm_models.get('5m')  # 5 dakikalık modeli kullan
+                if lstm_model is None:
+                    raise Exception("RL Trader için LSTM modeli bulunamadı!")
+                
                 self.rl_trader = RLTrader(
-                    state_size=len(self.data_processor.get_feature_names()),
-                    action_size=3,
-                    learning_rate=MODEL_CONFIG['rl']['learning_rate']
+                    lstm_model=lstm_model,
+                    env_params=env_params
                 )
                 print_success("RL Trader başarıyla başlatıldı!")
             except Exception as e:
-                print_warning("RL Trader başlatılamadı, yalnızca LSTM ile devam edilecek!")
+                print_warning(f"RL Trader başlatılamadı: {str(e)}")
+                print_info("Bot yalnızca LSTM modeli ile devam edecek.")
                 self.rl_trader = None
             
             print_section("BOT HAZIR!")

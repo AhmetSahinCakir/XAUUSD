@@ -46,7 +46,7 @@ MODEL_CONFIG = {
         'gradient_clip': 1.0,    # Gradient clipping değeri
     },
     'attention': {
-        'dims': [512, 256, 1],  # Attention boyutları
+        'dims': [512, 64, 1],  # Attention boyutları düzeltildi
         'dropout': 0.2  # Attention için dropout
     },
     'batch_norm': {

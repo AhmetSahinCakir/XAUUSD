@@ -25,6 +25,7 @@ TRADING_CONFIG = {
     'transaction_fee': float(os.getenv('TRANSACTION_FEE', '0.00025')), # İşlem ücreti (spread dahil ~2.5 pip)
     'trailing_stop': True,  # Trailing stop kullan
     'trailing_stop_factor': 1.5,  # ATR'nin kaç katı trailing stop mesafesi
+    'risk_reward_ratio': float(os.getenv('RISK_REWARD_RATIO', '2.0')),  # Risk/Ödül oranı (default 1:2)
     'partial_tp_enabled': True,  # Kısmi kar alma aktif
     'partial_tp_levels': [  # Kısmi kar alma seviyeleri
         {'percentage': 33, 'at_price_factor': 1.5},  # Pozisyonun %33'ü 1.5R'de
@@ -36,36 +37,54 @@ TRADING_CONFIG = {
 # Model parametreleri
 MODEL_CONFIG = {
     'lstm': {
-        'input_size': 32,  # Tüm özellikler
-        'hidden_size': 256,  # Orta seviye karmaşıklık
-        'num_layers': 3,    # 3 katman
-        'dropout': 0.3,     # Dropout oranı
-        'bidirectional': True,  # Çift yönlü LSTM
-        'threshold_high': 0.65,  # Alım sinyali için eşik
-        'threshold_low': 0.35,   # Satım sinyali için eşik
-        'gradient_clip': 1.0,    # Gradient clipping değeri
+        'input_size': 32,          # Giriş özellik sayısı
+        'hidden_size': 256,        # LSTM gizli katman boyutu artırıldı
+        'num_layers': 3,           # LSTM katman sayısı artırıldı
+        'dropout': 0.3,            # Dropout oranı artırıldı
+        'bidirectional': True,     # Çift yönlü LSTM
+        'threshold_high': 0.65,    # Yüksek tahmin eşiği
+        'threshold_low': 0.35,     # Düşük tahmin eşiği
+        'gradient_clip': 1.0,      # Gradient clipping değeri artırıldı
     },
     'attention': {
-        'dims': [512, 64, 1],  # Attention boyutları düzeltildi
-        'dropout': 0.2  # Attention için dropout
+        'dims': [512, 128, 1],     # Attention katman boyutları artırıldı
+        'dropout': 0.2             # Attention dropout oranı artırıldı
     },
     'batch_norm': {
-        'momentum': 0.1,
-        'eps': 1e-5
+        'momentum': 0.1,           # Batch norm momentum
+        'eps': 1e-5                # Batch norm epsilon
     },
     'training': {
-        'batch_size': 64,        # Batch size
-        'epochs': 100,           # Epoch sayısı
-        'learning_rate': 0.001,  # Öğrenme oranı
-        'sequence_length': 60,   # Zaman serisi uzunluğu
-        'prediction_steps': 1,   # Tahmin adımı
-        'train_split': 0.8,      # Eğitim seti oranı
-        'validation_split': 0.1, # Validasyon seti oranı
-        'test_split': 0.1,      # Test seti oranı
-        'early_stopping_patience': 15,  # Early stopping sabır sayısı
-        'reduce_lr_patience': 8,        # Learning rate azaltma sabır sayısı
-        'reduce_lr_factor': 0.5,        # Learning rate azaltma faktörü
-        'min_lr': 1e-6                  # Minimum learning rate
+        'batch_size': 64,          # Mini-batch boyutu artırıldı
+        'epochs': 100,             # Epoch sayısı artırıldı
+        'learning_rate': 0.001,    # Başlangıç öğrenme oranı artırıldı
+        'sequence_length': 60,     # Giriş sekans uzunluğu
+        'prediction_steps': 1,     # Tahmin adım sayısı
+        'train_split': 0.8,        # Eğitim seti oranı
+        'validation_split': 0.1,   # Doğrulama seti oranı
+        'test_split': 0.1,         # Test seti oranı
+        'early_stopping_patience': 15,  # Erken durdurma sabır sayısı artırıldı
+        'reduce_lr_patience': 7,    # LR azaltma sabır sayısı artırıldı
+        'reduce_lr_factor': 0.5,   # LR azaltma faktörü
+        'min_lr': 1e-6,            # Minimum learning rate
+        'weight_decay': 0.001,     # L2 regularizasyon katsayısı azaltıldı
+        'loss_scale': 1.0          # Loss ölçeklendirme faktörü artırıldı
+    },
+    'rl': {
+        'window_size': 60,         # Gözlem penceresi
+        'total_timesteps': 100000, # Toplam eğitim adımı
+        'learning_rate': 0.0001,   # RL öğrenme oranı
+        'batch_size': 64,          # RL batch boyutu
+        'n_steps': 2048,           # Her güncelleme için adım
+        'gamma': 0.99,             # İndirim faktörü
+        'policy_kwargs': {
+            'net_arch': [256, 128, 64]  # Policy ağ mimarisi
+        }
+    },
+    'integration': {
+        'use_lstm_predictions': True,      # LSTM tahminlerini kullan
+        'lstm_prediction_weight': 0.7,     # LSTM tahmin ağırlığı
+        'reward_lstm_accuracy': True       # Accuracy'yi ödüle dahil et
     }
 }
 

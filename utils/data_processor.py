@@ -15,10 +15,27 @@ EUROPE_SESSION = (time(9, 0), time(17, 0))
 US_SESSION = (time(17, 0), time(23, 59))
 
 class DataProcessor:
-    def __init__(self):
+    def __init__(self, mt5_connector=None):
         """
         Veri işleme sınıfı başlatıcı
+        
+        Args:
+            mt5_connector: MT5Connector instance (optional)
         """
+        # MT5 bağlantısı
+        if mt5_connector is None:
+            from utils.mt5_connector import MT5Connector
+            from config.config import MT5_CONFIG
+            self.mt5_connector = MT5Connector(
+                login=MT5_CONFIG['login'],
+                password=MT5_CONFIG['password'],
+                server=MT5_CONFIG['server']
+            )
+            if not self.mt5_connector.connect():
+                logger.error("MT5 bağlantısı başlatılamadı!")
+        else:
+            self.mt5_connector = mt5_connector
+        
         # Özellik isimleri
         self.feature_names = [
             'open', 'high', 'low', 'close', 'volume',  # Fiyat ve hacim
@@ -80,6 +97,13 @@ class DataProcessor:
         # Cache for technical indicators
         self.indicators_cache = {}
         self.cache_max_size = 10  # Maximum number of DataFrames to keep in cache
+        
+        # Veri alımı parametreleri
+        self.lookback_periods = {
+            '5m': 10000,    # Yaklaşık 5 hafta (5 * 24 * 60 / 5 = 1440 mum/gün)
+            '15m': 5000,    # Yaklaşık 7 hafta (5 * 24 * 60 / 15 = 480 mum/gün)
+            '1h': 2000      # Yaklaşık 12 hafta (5 * 24 = 120 mum/gün)
+        }
         
     def detect_price_gaps(self, df):
         """
@@ -1047,39 +1071,59 @@ class DataProcessor:
         """
         Farklı zaman dilimleri için alınan verileri işler ve eğitim için hazırlar
         
-        Parametreler:
-        - data_dict: Dict, her zaman dilimi için DataFrame içeren sözlük
+        Args:
+            data_dict: Dict, her zaman dilimi için DataFrame içeren sözlük
         
-        Dönüş:
-        - DataFrame: İşlenmiş ve birleştirilmiş veri
+        Returns:
+            DataFrame: İşlenmiş ve birleştirilmiş veri
         """
         try:
             processed_data = {}
             
             # Her zaman dilimi için veriyi işle
             for timeframe, df in data_dict.items():
+                logger.info(f"{timeframe} verisi işleniyor...")
+                
+                # Veri kalitesi kontrolü
+                if df.isnull().values.any():
+                    missing_count = df.isnull().sum().sum()
+                    logger.warning(f"{timeframe} için {missing_count} eksik veri bulundu. Dolduruluyor...")
+                    df = df.fillna(method='ffill').fillna(method='bfill')
+                
                 # Teknik göstergeleri ekle
-                df = self.add_technical_indicators(df.copy())
-                if df is None:
+                logger.info(f"{timeframe} için teknik göstergeler ekleniyor...")
+                df_with_indicators = self.add_technical_indicators(df.copy())
+                if df_with_indicators is None:
+                    logger.error(f"{timeframe} için teknik göstergeler eklenemedi")
                     continue
-                    
+                
                 # Fiyat boşluklarını tespit et
-                df = self.detect_price_gaps(df)
-                if df is None:
+                logger.info(f"{timeframe} için fiyat boşlukları tespit ediliyor...")
+                df_with_gaps = self.detect_price_gaps(df_with_indicators)
+                if df_with_gaps is None:
+                    logger.error(f"{timeframe} için fiyat boşlukları tespit edilemedi")
                     continue
-                    
+                
                 # Seans bilgilerini ekle
-                df = self.add_session_info(df)
-                if df is None:
+                logger.info(f"{timeframe} için seans bilgileri ekleniyor...")
+                final_df = self.add_session_info(df_with_gaps)
+                if final_df is None:
+                    logger.error(f"{timeframe} için seans bilgileri eklenemedi")
                     continue
+                
+                # Son kontroller
+                if final_df.isnull().values.any():
+                    logger.warning(f"{timeframe} için son işlemlerden sonra eksik veriler var. Dolduruluyor...")
+                    final_df = final_df.fillna(method='ffill').fillna(method='bfill')
                 
                 # Zaman dilimi bilgisini ekle
-                df['timeframe'] = timeframe
+                final_df['timeframe'] = timeframe
+                processed_data[timeframe] = final_df
                 
-                processed_data[timeframe] = df
+                logger.info(f"{timeframe} verisi başarıyla işlendi. Satır sayısı: {len(final_df)}")
             
             if not processed_data:
-                return None
+                raise Exception("Hiçbir veri işlenemedi")
             
             # Tüm verileri birleştir
             combined_data = pd.concat(processed_data.values(), ignore_index=True)
@@ -1088,40 +1132,161 @@ class DataProcessor:
             combined_data['time'] = pd.to_datetime(combined_data['time'])
             combined_data = combined_data.sort_values('time')
             
+            logger.info(f"Toplam işlenmiş veri boyutu: {len(combined_data)} satır")
             return combined_data
             
         except Exception as e:
             logger.error(f"Veri işleme hatası: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
-    def get_latest_data(self, lookback_periods=1000):
-        """Son verileri alır ve RL modeli için hazırlar
+    def get_training_data(self, timeframe=None):
+        """
+        Eğitim verilerini hazırlar ve döndürür
         
         Args:
-            lookback_periods (int): Alınacak geçmiş veri sayısı
-            
+            timeframe (str, optional): İstenen zaman dilimi. None ise tüm zaman dilimleri için veri döndürür.
+        
         Returns:
-            pd.DataFrame: İşlenmiş veri
+            pd.DataFrame: İşlenmiş eğitim verisi
         """
         try:
-            # MT5'ten veri al
-            data = self.mt5_connector.get_historical_data(
-                symbol="XAUUSD",
-                timeframe="5m",
-                num_candles=lookback_periods
-            )
+            # MT5 bağlantı durumunu kontrol et
+            if not self.mt5_connector.connected:
+                logger.error("MT5 bağlantısı yok. Bağlantı yeniden deneniyor...")
+                if not self.mt5_connector.connect():
+                    raise Exception("MT5 bağlantısı kurulamadı!")
+
+            # Tüm timeframe'ler için veriyi bir kerede al
+            all_data = {}
+            for tf, periods in self.lookback_periods.items():
+                if timeframe and tf != timeframe:
+                    continue
+                
+                logger.info(f"{tf} için {periods} mum verisi alınıyor...")
+                
+                # Veri alımını 3 kez dene
+                for attempt in range(3):
+                    try:
+                        data = self.mt5_connector.get_historical_data(
+                            symbol="XAUUSD",
+                            timeframe=tf,
+                            num_candles=periods
+                        )
+                        
+                        if data is not None and len(data) >= periods * 0.5:  # En az %50 veri gerekli
+                            all_data[tf] = data
+                            logger.info(f"{tf} için {len(data)} satır veri alındı")
+                            break
+                        else:
+                            logger.warning(f"Deneme {attempt + 1}: {tf} için yeterli veri alınamadı")
+                            if attempt < 2:  # Son deneme değilse bekle
+                                time.sleep(2)  # 2 saniye bekle
+                    except Exception as e:
+                        logger.error(f"Deneme {attempt + 1}: {tf} verisi alınırken hata: {str(e)}")
+                        if attempt < 2:
+                            time.sleep(2)
+                
+                if tf not in all_data:
+                    logger.error(f"{tf} için veri alınamadı")
+                    if timeframe:  # Belirli bir timeframe isteniyorsa ve alınamadıysa hata ver
+                        raise Exception(f"{tf} için veri alınamadı")
+                    
+            if not all_data:
+                raise Exception("Hiçbir zaman dilimi için veri alınamadı")
             
-            if data is None or len(data) < lookback_periods:
-                raise Exception(f"Yeterli veri alınamadı: {len(data) if data is not None else 0}/{lookback_periods}")
-            
-            # Teknik göstergeleri ekle
-            processed_data = self.add_technical_indicators(data)
-            
-            # NaN değerleri temizle
-            processed_data = processed_data.dropna()
-            
-            return processed_data
+            # Verileri işle
+            return self.process_training_data(all_data)
             
         except Exception as e:
-            logger.error(f"Veri alma hatası: {str(e)}")
-            return pd.DataFrame()
+            logger.error(f"Eğitim verisi hazırlanırken hata: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+
+    def prepare_sequences(self, df, sequence_length=60, target_column='close', prediction_steps=1):
+        """
+        LSTM modeli için sekans verilerini hazırlar
+        
+        Parametreler:
+        - df: İşlenecek DataFrame
+        - sequence_length: Her bir örnek için kullanılacak geçmiş veri miktarı
+        - target_column: Tahmin edilecek hedef sütun
+        - prediction_steps: Kaç adım ilerisini tahmin edeceğiz
+        
+        Dönüş:
+        - sequences: Eğitim sekansları
+        - targets: Hedef değerler
+        """
+        try:
+            if df is None or len(df) < sequence_length + prediction_steps:
+                logger.error(f"Yetersiz veri: {len(df) if df is not None else 0} satır < {sequence_length + prediction_steps}")
+                return None, None
+            
+            # Teknik göstergeleri ekle
+            df = self.add_technical_indicators(df)
+            if df is None:
+                return None, None
+            
+            # NaN değerleri temizle
+            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            
+            # Tüm özelliklerin var olduğunu kontrol et
+            df = self.all_features_exist(df)
+            if df is None:
+                return None, None
+            
+            # Önce hedef değişkeni normalize et (yüzdesel değişim olarak)
+            target_values = df[target_column].values
+            target_changes = np.diff(target_values) / target_values[:-1]  # Yüzdesel değişim
+            target_changes = np.clip(target_changes, -0.1, 0.1)  # ±%10 ile sınırla
+            
+            # Verileri normalize et
+            feature_data = df[self.all_features].values
+            if not self.feature_scaler_fitted:
+                # Her özellik için ayrı normalizasyon
+                normalized_data = np.zeros_like(feature_data)
+                for i in range(feature_data.shape[1]):
+                    feat = feature_data[:, i]
+                    mean = feat.mean()
+                    std = feat.std()
+                    if std < 1e-8:
+                        normalized_data[:, i] = feat - mean
+                    else:
+                        normalized_data[:, i] = (feat - mean) / std
+                self.feature_scaler_fitted = True
+            else:
+                normalized_data = self.feature_scaler.transform(feature_data)
+            
+            # Sekansları ve hedefleri hazırla
+            sequences = []
+            targets = []
+            
+            for i in range(len(normalized_data) - sequence_length - prediction_steps + 1):
+                # Geçmiş veri
+                seq = normalized_data[i:(i + sequence_length)]
+                # Gelecek değer (hedef) - yüzdesel değişim
+                target = target_changes[i + sequence_length - 1]
+                
+                sequences.append(seq)
+                targets.append(target)
+            
+            # NumPy dizilerine dönüştür
+            sequences = np.array(sequences)
+            targets = np.array(targets)
+            
+            # PyTorch tensor'larına dönüştür
+            sequences = torch.FloatTensor(sequences)
+            targets = torch.FloatTensor(targets).reshape(-1, 1)
+            
+            logger.info(f"Veri hazırlama tamamlandı: {len(sequences)} örnek")
+            logger.debug(f"Hedef değişken aralığı: {targets.min().item():.4f} - {targets.max().item():.4f}")
+            
+            return sequences, targets
+            
+        except Exception as e:
+            logger.error(f"Sekans hazırlanırken hata: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None, None

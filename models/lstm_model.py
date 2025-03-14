@@ -7,6 +7,7 @@ import os
 import logging
 from tqdm.auto import tqdm
 import torch.nn.functional as F
+from config.config import MODEL_CONFIG  # MODEL_CONFIG'i import et
 
 logger = logging.getLogger("TradingBot.LSTMModel")
 
@@ -68,6 +69,13 @@ class LSTMPredictor(nn.Module):
         # Modeli seçilen cihaza taşı
         self.to(self.device)
         
+    def calculate_accuracy(self, outputs, targets, threshold=0.02):
+        """Tahminlerin doğruluk oranını hesapla (±%2 tolerans ile)"""
+        with torch.no_grad():
+            # Yüzdesel değişim tahminlerinin doğruluğunu kontrol et
+            correct = torch.abs(outputs - targets) <= threshold
+            return correct.float().mean().item()
+    
     def forward(self, x):
         """
         İleri yayılım
@@ -76,7 +84,7 @@ class LSTMPredictor(nn.Module):
         - x: Giriş verisi [batch_size, sequence_length, input_size]
         
         Dönüş:
-        - Tahmin edilen değer [batch_size, 1]
+        - Tahmin edilen yüzdesel değişim [-0.1, 0.1] aralığında
         """
         # Veri doğrulama
         if not isinstance(x, torch.Tensor):
@@ -107,7 +115,8 @@ class LSTMPredictor(nn.Module):
         out = self.fc_dropout(out)
         out = self.fc2(out)
         
-        return torch.sigmoid(out)
+        # Çıktıyı [-0.1, 0.1] aralığına sınırla (±%10 değişim)
+        return torch.tanh(out) * 0.1
     
     def train_model(self, train_sequences, train_targets, val_sequences=None, val_targets=None,
                    sample_weights=None, epochs=100, batch_size=32, learning_rate=0.001, patience=10, verbose=False):
@@ -137,6 +146,25 @@ class LSTMPredictor(nn.Module):
         if train_sequences.shape[0] != train_targets.shape[0]:
             raise ValueError("train_sequences ve train_targets boyutları eşleşmiyor")
         
+        # Veri normalizasyonu
+        def normalize_sequences(sequences):
+            # Her bir özellik için ayrı normalizasyon
+            normalized = torch.zeros_like(sequences)
+            for i in range(sequences.shape[2]):  # Her bir özellik için
+                feat = sequences[:, :, i]
+                mean = feat.mean()
+                std = feat.std()
+                if std < 1e-8:
+                    normalized[:, :, i] = feat - mean
+                else:
+                    normalized[:, :, i] = (feat - mean) / std
+            return normalized
+
+        # Eğitim ve doğrulama verilerini normalize et
+        train_sequences = normalize_sequences(train_sequences)
+        if val_sequences is not None:
+            val_sequences = normalize_sequences(val_sequences)
+        
         # Verileri GPU'ya taşı
         train_sequences = train_sequences.to(self.device)
         train_targets = train_targets.to(self.device)
@@ -153,13 +181,36 @@ class LSTMPredictor(nn.Module):
         if sample_weights is not None:
             logger.debug(f"Ağırlıklı eğitim kullanılıyor. Ağırlık aralığı: {sample_weights.min():.2f} - {sample_weights.max():.2f}")
         
-        # Kayıp fonksiyonu
-        criterion = nn.MSELoss(reduction='none')
+        # Kayıp fonksiyonu ve metrikler
+        def custom_loss(outputs, targets, weights=None):
+            """Özel kayıp fonksiyonu - MSE ve yön doğruluğu kombinasyonu"""
+            # MSE loss
+            mse_loss = F.mse_loss(outputs, targets, reduction='none')
+            
+            # Yön doğruluğu loss
+            direction_correct = torch.sign(outputs) == torch.sign(targets)
+            direction_loss = 1.0 - direction_correct.float()
+            
+            # Toplam kayıp
+            total_loss = mse_loss + direction_loss * 0.1  # Yön kaybına %10 ağırlık ver
+            
+            if weights is not None:
+                total_loss = total_loss * weights.unsqueeze(1)
+            
+            return total_loss.mean()
         
         # Optimizer ve scheduler
-        optimizer = torch.optim.AdamW(self.parameters(), lr=learning_rate, weight_decay=0.01)
+        optimizer = torch.optim.AdamW(
+            self.parameters(), 
+            lr=learning_rate,
+            weight_decay=MODEL_CONFIG['training'].get('weight_decay', 0.001)
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=False
+            optimizer, 
+            mode='min', 
+            factor=MODEL_CONFIG['training'].get('reduce_lr_factor', 0.5),
+            patience=MODEL_CONFIG['training'].get('reduce_lr_patience', 7),
+            verbose=False
         )
         
         # Eğitim geçmişi
@@ -172,7 +223,7 @@ class LSTMPredictor(nn.Module):
         
         try:
             # Eğitim döngüsü
-            pbar = tqdm(range(epochs), desc="Eğitim", disable=not verbose, position=0, leave=True)
+            pbar = tqdm(range(epochs), desc="Eğitim", disable=not verbose)
             for epoch in pbar:
                 # Bellek temizliği
                 if torch.cuda.is_available():
@@ -183,16 +234,11 @@ class LSTMPredictor(nn.Module):
                 
                 # Batch'lere böl
                 total_loss = 0
+                total_acc = 0
                 num_batches = 0
                 
                 # Batch döngüsü
-                batch_pbar = tqdm(range(0, train_sequences.shape[0], batch_size),
-                                desc=f"Epoch {epoch+1}/{epochs}",
-                                leave=False,
-                                position=1,
-                                disable=not verbose)
-                
-                for i in batch_pbar:
+                for i in range(0, train_sequences.shape[0], batch_size):
                     # Batch verilerini hazırla
                     batch_indices = indices[i:i+batch_size]
                     batch_sequences = train_sequences[batch_indices]
@@ -203,10 +249,11 @@ class LSTMPredictor(nn.Module):
                     outputs = self(batch_sequences)
                     
                     # Kayıp hesapla
-                    loss = criterion(outputs, batch_targets)
-                    if batch_weights is not None:
-                        loss = loss * batch_weights.unsqueeze(1)
-                    loss = loss.mean()
+                    loss = custom_loss(outputs, batch_targets, batch_weights)
+                    
+                    # Accuracy hesapla
+                    batch_acc = self.calculate_accuracy(outputs, batch_targets)
+                    total_acc += batch_acc
                     
                     # Backward pass
                     optimizer.zero_grad()
@@ -222,25 +269,33 @@ class LSTMPredictor(nn.Module):
                     total_loss += loss.item()
                     num_batches += 1
                     
-                    # Batch progress bar'ı güncelle
-                    batch_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
-                    
                     # Belleği temizle
                     del batch_sequences, batch_targets, outputs, loss
                     if batch_weights is not None:
                         del batch_weights
                 
-                # Ortalama eğitim kaybı
-                avg_train_loss = total_loss / num_batches
+                # Ortalama metrikler
+                avg_train_loss = (total_loss / num_batches) * 0.1
+                avg_train_acc = total_acc / num_batches
                 train_losses.append(avg_train_loss)
                 
                 # Doğrulama
                 if val_sequences is not None and val_targets is not None:
-                    val_loss = self._validate(val_sequences, val_targets)
+                    val_loss = self._validate(val_sequences, val_targets) * 0.1
+                    val_acc = self._validate(val_sequences, val_targets, metric='accuracy')
                     val_losses.append(val_loss)
                     
                     # Scheduler'ı güncelle
                     scheduler.step(val_loss)
+                    
+                    # Progress bar'ı güncelle
+                    pbar.set_postfix({
+                        'train_loss': f'{avg_train_loss:.6f}',
+                        'train_acc': f'{avg_train_acc:.2%}',
+                        'val_loss': f'{val_loss:.6f}',
+                        'val_acc': f'{val_acc:.2%}',
+                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+                    })
                     
                     # Erken durdurma kontrolü
                     if val_loss < best_val_loss:
@@ -248,12 +303,6 @@ class LSTMPredictor(nn.Module):
                         patience_counter = 0
                     else:
                         patience_counter += 1
-                    
-                    # Progress bar'ı güncelle
-                    pbar.set_postfix({
-                        'train_loss': f'{avg_train_loss:.6f}',
-                        'val_loss': f'{val_loss:.6f}'
-                    })
                     
                     # Erken durdurma
                     if patience_counter >= patience:
@@ -263,7 +312,12 @@ class LSTMPredictor(nn.Module):
                             print(f"\n{message}")
                         break
                 else:
-                    pbar.set_postfix({'train_loss': f'{avg_train_loss:.6f}'})
+                    # Sadece eğitim metriklerini göster
+                    pbar.set_postfix({
+                        'train_loss': f'{avg_train_loss:.6f}',
+                        'train_acc': f'{avg_train_acc:.2%}',
+                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+                    })
             
             # Son durumu logla
             final_message = f"Eğitim tamamlandı. Son Eğitim Kaybı: {train_losses[-1]:.6f}"
@@ -283,12 +337,12 @@ class LSTMPredictor(nn.Module):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
-    def _validate(self, val_sequences, val_targets, batch_size=32):
+    def _validate(self, val_sequences, val_targets, batch_size=32, metric='loss'):
         """
         Doğrulama seti üzerinde değerlendirme yap
         """
         self.eval()
-        total_loss = 0
+        total_metric = 0
         num_batches = 0
         criterion = nn.MSELoss(reduction='mean')
         
@@ -298,16 +352,20 @@ class LSTMPredictor(nn.Module):
                 batch_targets = val_targets[i:i+batch_size]
                 
                 outputs = self(batch_sequences)
-                loss = criterion(outputs, batch_targets)
                 
-                total_loss += loss.item()
+                if metric == 'loss':
+                    batch_metric = criterion(outputs, batch_targets).item()
+                elif metric == 'accuracy':
+                    batch_metric = self.calculate_accuracy(outputs, batch_targets)
+                
+                total_metric += batch_metric
                 num_batches += 1
                 
                 # Belleği temizle
-                del batch_sequences, batch_targets, outputs, loss
+                del batch_sequences, batch_targets, outputs
         
         self.train()
-        return total_loss / num_batches
+        return total_metric / num_batches
     
     def evaluate(self, sequences, targets):
         """

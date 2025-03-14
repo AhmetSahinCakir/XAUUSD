@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple
 import MetaTrader5 as mt5
+import json
 
 class LSTMPredictor(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, output_size: int):
@@ -52,7 +53,7 @@ class ForexTradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(15,),  # price data (5) + technical indicators (7) + account state (3)
+            shape=(16,),  # price data (5) + technical indicators (7) + account state (3) + lstm prediction (1)
             dtype=np.float32
         )
         
@@ -95,6 +96,9 @@ class ForexTradingEnv(gym.Env):
             self.last_trade_price / current_data['close'] if self.last_trade_price > 0 else 0
         ])
         
+        # LSTM prediction (1 feature)
+        lstm_prediction = np.array([current_data['lstm_prediction']])
+        
         # Safe normalization function
         def safe_normalize(data):
             if len(data) == 0:
@@ -107,13 +111,15 @@ class ForexTradingEnv(gym.Env):
         # Normalize data
         normalized_price = safe_normalize(price_data)
         normalized_tech = safe_normalize(technical_indicators)
+        normalized_lstm = safe_normalize(lstm_prediction)
         
         # Combine all data and flatten
         observation = np.concatenate([
-            normalized_price,  # 5 features
-            normalized_tech,   # 7 features
-            account_state     # 3 features
-        ]).flatten()  # Total 15 features
+            normalized_price,     # 5 features
+            normalized_tech,      # 7 features
+            account_state,       # 3 features
+            normalized_lstm      # 1 feature
+        ]).flatten()  # Total 16 features
         
         # Check for NaN values
         if np.isnan(observation).any():
@@ -210,250 +216,261 @@ class ForexTradingEnv(gym.Env):
 
 class RLTrader:
     def __init__(self, lstm_model: LSTMPredictor, env_params: dict):
-        self.lstm_model = lstm_model
-        self.env_params = env_params
-        self.model = None
-        self.env = None  # Çevre değişkenini burada tanımlıyoruz
-        
-        # Create initial environment and make it accessible
-        self.env = self.create_env(env_params.get('df', pd.DataFrame()))
-        
-        # Set PPO model parameters
-        self.model_params = {
-            "learning_rate": 0.0003,
-            "n_steps": 2048,
-            "batch_size": 64,
-            "n_epochs": 10,
-            "gamma": 0.99,
-            "gae_lambda": 0.95,
-            "clip_range": 0.2,
-            "max_grad_norm": 0.5,
-            "vf_coef": 0.5,
-            "ent_coef": 0.01
-        }
-    
-    def create_env(self, df):
-        """Creates a vectorized environment for RL training"""
-        
-        # Check if DataFrame is valid
-        if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-            print("Warning: Empty DataFrame provided for environment creation. Using dummy data.")
-            # Create a minimal dummy DataFrame to initialize environment
-            df = pd.DataFrame({
-                'open': [100.0] * 10,
-                'high': [101.0] * 10,
-                'low': [99.0] * 10,
-                'close': [100.5] * 10,
-                'tick_volume': [100] * 10,
-                'RSI': [50.0] * 10,
-                'MACD': [0.0] * 10,
-                'Signal_Line': [0.0] * 10,
-                'ATR': [1.0] * 10,
-                'Upper_Band': [102.0] * 10,
-                'Lower_Band': [98.0] * 10,
-                'MA20': [100.0] * 10
-            })
-        
-        # Check for required columns
-        required_cols = ['open', 'high', 'low', 'close', 'tick_volume', 
-                         'RSI', 'MACD', 'Signal_Line', 'ATR', 
-                         'Upper_Band', 'Lower_Band', 'MA20']
-        
-        # Check and add missing columns
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            print(f"Adding missing columns to environment DataFrame: {missing_cols}")
-            for col in missing_cols:
-                if col in ['open', 'high', 'low', 'close']:
-                    df[col] = 100.0
-                elif col == 'tick_volume':
-                    df[col] = 100
-                elif col == 'RSI':
-                    df[col] = 50.0
-                elif col in ['MACD', 'Signal_Line']:
-                    df[col] = 0.0
-                elif col == 'ATR':
-                    df[col] = 1.0
-                elif col == 'Upper_Band':
-                    df[col] = 102.0
-                elif col == 'Lower_Band':
-                    df[col] = 98.0
-                elif col == 'MA20':
-                    df[col] = 100.0
-            
-        # Create environment creator function   
-        def _init():
-            try:
-                env_params = self.env_params.copy()
-                if 'df' in env_params:
-                    del env_params['df']
-                if 'lstm_model' in env_params:
-                    del env_params['lstm_model']
-                return ForexTradingEnv(df, self.lstm_model, **env_params)
-            except Exception as e:
-                print(f"Error creating environment: {str(e)}")
-                # Use default parameters if any error occurs
-                return ForexTradingEnv(
-                    df=df, 
-                    lstm_model=self.lstm_model,
-                    initial_balance=10000.0,
-                    max_position_size=1.0,
-                    transaction_fee=0.0001
-                )
-        
-        # Create and return vectorized environment
-        try:
-            return DummyVecEnv([_init])
-        except Exception as e:
-            print(f"Error creating vectorized environment: {str(e)}")
-            # Create simplest possible environment
-            return DummyVecEnv([lambda: ForexTradingEnv(df, self.lstm_model, initial_balance=10000.0)])
-    
-    def train(self, train_df: pd.DataFrame, total_timesteps: int = 100000) -> None:
-        try:
-            # Check data
-            if train_df.empty:
-                raise ValueError("Training data is empty!")
-                
-            # Check for NaN values and clean
-            if train_df.isnull().values.any():
-                print("Warning: NaN values found in training data. Filling with forward fill method...")
-                train_df = train_df.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
-            # Check if all required technical indicators exist
-            required_cols = ['RSI', 'MACD', 'Signal_Line', 'ATR', 'Upper_Band', 'Lower_Band', 'MA20']
-            missing_cols = [col for col in required_cols if col not in train_df.columns]
-            
-            if missing_cols:
-                print(f"Warning: Missing technical indicators: {missing_cols}")
-                # Add missing columns with default values
-                for col in missing_cols:
-                    if col == 'RSI':
-                        train_df[col] = 50  # Neutral RSI
-                    elif col in ['MACD', 'Signal_Line']:
-                        train_df[col] = 0  # Neutral MACD
-                    elif col == 'ATR':
-                        train_df[col] = train_df['close'] * 0.01  # 1% volatility
-                    elif col in ['Upper_Band', 'Lower_Band']:
-                        if 'MA20' in train_df.columns:
-                            # If MA20 exists, use it to create bands
-                            std = train_df['close'].rolling(window=20, min_periods=1).std().fillna(0)
-                            if col == 'Upper_Band':
-                                train_df[col] = train_df['MA20'] + (2 * std)
-                            else:
-                                train_df[col] = train_df['MA20'] - (2 * std)
-                        else:
-                            # Otherwise, use simple calculation
-                            if col == 'Upper_Band':
-                                train_df[col] = train_df['close'] * 1.02
-                            else:
-                                train_df[col] = train_df['close'] * 0.98
-                    elif col == 'MA20':
-                        train_df[col] = train_df['close'].rolling(window=20, min_periods=1).mean().fillna(train_df['close'])
-            
-            # Create a new environment for this training session
-            self.env = self.create_env(train_df)
-            
-            # Initialize or load model
-            if self.model is None:
-                print("Creating new PPO model...")
-                self.model = PPO(
-                    "MlpPolicy",
-                    self.env,  # Use the stored environment
-                    verbose=1,
-                    **self.model_params
-                )
-            else:
-                # Önemli: Eğer model varsa, çevreyi güncelle
-                print("Updating existing model with new environment...")
-                self.model.set_env(self.env)  # Update environment
-            
-            # Make sure model has a valid environment before training
-            if self.model.env is None:
-                print("Environment not set correctly. Setting it now...")
-                self.model.env = self.env
-            
-            # Train model
-            print("Starting model training...")
-            self.model.learn(total_timesteps=total_timesteps)
-            print("Model training completed!")
-            
-        except Exception as e:
-            import traceback
-            print(f"Error during training: {str(e)}")
-            traceback.print_exc()
-            raise
-    
-    def predict(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Predicts action for given observation.
+        RL trader initialization
         
         Args:
-            obs: Observation, shape (15,) or (1, 15)
+            lstm_model: Trained LSTM model for price predictions
+            env_params: Environment parameters including:
+                - df: DataFrame with price data
+                - window_size: Size of observation window
+                - initial_balance: Starting balance
+                - commission: Trading commission
+        """
+        self.lstm_model = lstm_model
+        self.model = None
+        
+        # Model parameters
+        self.model_params = {
+            'learning_rate': 0.0001,
+            'batch_size': 64,
+            'n_steps': 2048,
+            'gamma': 0.99,
+            'policy_kwargs': dict(
+                net_arch=[256, 128, 64]  # Deeper network for more complex patterns
+            )
+        }
+        
+        # Split data for training and validation
+        train_size = int(len(env_params['df']) * 0.8)  # 80% training, 20% validation
+        self.train_df = env_params['df'][:train_size]
+        self.val_df = env_params['df'][train_size:]
+        
+        # Create environments
+        self.train_env = self.create_env(self.train_df)
+        self.val_env = self.create_env(self.val_df)
+        
+        # Training metrics
+        self.train_metrics = []
+        self.val_metrics = []
+        
+    def create_env(self, df: pd.DataFrame) -> gym.Env:
+        """
+        Create trading environment
+        
+        Args:
+            df: DataFrame with price data
             
         Returns:
-            action: Predicted action
-            _: Model state (not used)
+            gym.Env: Trading environment
+        """
+        # Prepare LSTM predictions for the entire dataset
+        lstm_predictions = []
+        
+        # Process data in chunks to avoid memory issues
+        chunk_size = 1000
+        for i in range(0, len(df), chunk_size):
+            chunk = df.iloc[i:i+chunk_size]
+            # Prepare data for LSTM
+            lstm_data = self.prepare_lstm_data(chunk)
+            # Get LSTM predictions
+            with torch.no_grad():
+                pred = self.lstm_model(lstm_data)
+                lstm_predictions.extend(pred.numpy())
+        
+        # Add LSTM predictions to the DataFrame
+        df['lstm_prediction'] = lstm_predictions
+        
+        # Create environment with enhanced state space
+        env = ForexTradingEnv(
+            df=df,
+            lstm_model=self.lstm_model,
+            initial_balance=self.env_params['initial_balance'],
+            max_position_size=self.env_params['max_position_size'],
+            transaction_fee=self.env_params['commission']
+        )
+        
+        return env
+    
+    def prepare_lstm_data(self, df: pd.DataFrame) -> torch.Tensor:
+        """
+        Prepare data for LSTM model
+        
+        Args:
+            df: DataFrame with price data
+            
+        Returns:
+            torch.Tensor: Prepared data for LSTM
+        """
+        # Add technical indicators
+        df = add_technical_indicators(df)
+        
+        # Normalize data
+        df = normalize_data(df)
+        
+        # Convert to tensor
+        data = torch.FloatTensor(df.values)
+        
+        return data
+    
+    def evaluate_model(self, env: gym.Env, num_episodes: int = 5) -> dict:
+        """
+        Evaluate model performance on given environment
+        
+        Args:
+            env: Environment to evaluate on
+            num_episodes: Number of episodes to evaluate
+            
+        Returns:
+            dict: Evaluation metrics
+        """
+        if self.model is None:
+            raise ValueError("Model not trained yet")
+            
+        total_rewards = []
+        total_returns = []
+        win_rate = 0
+        
+        for episode in range(num_episodes):
+            obs, _ = env.reset()
+            done = False
+            episode_reward = 0
+            initial_balance = env.balance
+            
+            while not done:
+                action, _ = self.model.predict(obs, deterministic=True)
+                obs, reward, done, _, info = env.step(action)
+                episode_reward += reward
+            
+            # Calculate metrics
+            total_rewards.append(episode_reward)
+            episode_return = (env.balance - initial_balance) / initial_balance
+            total_returns.append(episode_return)
+            win_rate += 1 if episode_return > 0 else 0
+        
+        # Calculate average metrics
+        avg_reward = np.mean(total_rewards)
+        avg_return = np.mean(total_returns)
+        win_rate = win_rate / num_episodes
+        
+        return {
+            'avg_reward': avg_reward,
+            'avg_return': avg_return,
+            'win_rate': win_rate,
+            'total_rewards': total_rewards,
+            'total_returns': total_returns
+        }
+        
+    def train(self, train_df: pd.DataFrame, total_timesteps: int = 100000, eval_freq: int = 10000) -> None:
+        """
+        Train the RL model
+        
+        Args:
+            train_df: Training data
+            total_timesteps: Total number of training steps
+            eval_freq: Frequency of evaluation (in steps)
+        """
+        try:
+            print("Creating PPO model...")
+            self.model = PPO(
+                "MlpPolicy",
+                self.train_env,
+                verbose=1,
+                **self.model_params
+            )
+            
+            print(f"Starting training for {total_timesteps:,} timesteps...")
+            
+            # Training loop with periodic evaluation
+            timesteps_elapsed = 0
+            while timesteps_elapsed < total_timesteps:
+                # Train for eval_freq steps
+                self.model.learn(
+                    total_timesteps=min(eval_freq, total_timesteps - timesteps_elapsed),
+                    reset_num_timesteps=False
+                )
+                timesteps_elapsed += eval_freq
+                
+                # Evaluate on training environment
+                train_metrics = self.evaluate_model(self.train_env)
+                self.train_metrics.append({
+                    'timestep': timesteps_elapsed,
+                    **train_metrics
+                })
+                
+                # Evaluate on validation environment
+                val_metrics = self.evaluate_model(self.val_env)
+                self.val_metrics.append({
+                    'timestep': timesteps_elapsed,
+                    **val_metrics
+                })
+                
+                # Print progress
+                print(f"\nTimestep: {timesteps_elapsed:,}/{total_timesteps:,}")
+                print(f"Training - Avg Return: {train_metrics['avg_return']:.2%}, Win Rate: {train_metrics['win_rate']:.2%}")
+                print(f"Validation - Avg Return: {val_metrics['avg_return']:.2%}, Win Rate: {val_metrics['win_rate']:.2%}")
+            
+            print("\nTraining completed!")
+            
+        except Exception as e:
+            print(f"Training error: {str(e)}")
+            raise
+    
+    def predict(self, state: np.ndarray) -> Tuple[int, float]:
+        """
+        Predict action for given state
+        
+        Args:
+            state: Current state including LSTM prediction
+            
+        Returns:
+            action: Predicted action (0: Hold, 1: Buy, 2: Sell)
+            confidence: Model's confidence in the action
         """
         if self.model is None:
             raise ValueError("Model not trained yet!")
-            
-        # Check observation shape and adjust
-        if isinstance(obs, torch.Tensor):
-            obs = obs.numpy()
-            
-        if len(obs.shape) == 1:
-            obs = obs.reshape(1, -1)
-            
-        if obs.shape[1] != 15:
-            raise ValueError(f"Observation shape must be (1, 15), got {obs.shape}")
-            
-        return self.model.predict(obs)
+        
+        # Get LSTM prediction for current state
+        lstm_data = self.prepare_lstm_data(state)
+        with torch.no_grad():
+            lstm_pred = self.lstm_model(lstm_data)
+        
+        # Add LSTM prediction to state
+        enhanced_state = np.append(state, lstm_pred.numpy())
+        
+        # Get RL prediction
+        action, _ = self.model.predict(enhanced_state, deterministic=True)
+        
+        return action
     
     def save(self, path: str) -> None:
-        """Saves model to file"""
-        try:
-            if self.model is not None:
-                print(f"Saving RL model to {path}...")
-                self.model.save(path)
-                print(f"RL model saved successfully")
-            else:
-                print("Warning: No model to save!")
-        except Exception as e:
-            print(f"Error saving RL model: {str(e)}")
+        """
+        Save model and training metrics
+        
+        Args:
+            path: Path to save model
+        """
+        if self.model is None:
+            raise ValueError("No model to save")
+            
+        # Save model
+        self.model.save(path)
+        
+        # Save metrics
+        metrics_path = path.replace('.zip', '_metrics.json')
+        metrics = {
+            'train_metrics': self.train_metrics,
+            'val_metrics': self.val_metrics
+        }
+        
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=4)
     
     def load(self, path: str) -> None:
-        """Loads model from file"""
+        """Load model from file"""
         try:
-            print(f"Loading RL model from {path}...")
-            # Make sure we have a valid environment
-            if self.env is None:
-                print("Creating environment for model loading...")
-                self.env = self.create_env(self.env_params.get('df', pd.DataFrame()))
-            
-            # Load the model with the environment
-            self.model = PPO.load(path, env=self.env)
-            
-            # Double check that the environment is properly set
-            if self.model.env is None:
-                print("Environment not set after loading. Setting it now...")
-                self.model.set_env(self.env)
-            
-            # Ensure the model parameters are set
-            if hasattr(self.model, 'learning_rate'):
-                self.model_params['learning_rate'] = self.model.learning_rate
-            
-            print(f"RL model loaded successfully")
+            self.model = PPO.load(path)
+            print(f"RL model loaded from {path}")
         except Exception as e:
-            print(f"Error loading RL model: {str(e)}")
-            # Create a new model if loading fails
-            print("Creating new RL model instead...")
-            if self.env is None:
-                self.env = self.create_env(self.env_params.get('df', pd.DataFrame()))
-            
-            self.model = PPO(
-                "MlpPolicy",
-                self.env,
-                verbose=1,
-                **self.model_params
-            ) 
+            print(f"Error loading model: {str(e)}")
+            raise 

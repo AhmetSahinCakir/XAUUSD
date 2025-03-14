@@ -5,6 +5,15 @@ from datetime import datetime, timedelta
 import pytz
 import math
 import time
+import logging
+from .logger import (
+    print_info,
+    print_warning,
+    print_error,
+    print_success
+)
+
+logger = logging.getLogger(__name__)
 
 class MT5Connector:
     """
@@ -30,70 +39,94 @@ class MT5Connector:
         self.connect()
     
     def connect(self):
-        """
-        MT5 terminaline bağlanır
-        
-        Başarılı bağlantı durumunda True, aksi halde False döndürür
-        """
+        """Connect to MetaTrader 5"""
         try:
-            # MT5 çoktan başlatıldıysa ve bağlandıysa, zaten bağlı olduğunu bildir
-            if mt5.terminal_info() is not None and self.connected:
-                print("MT5 zaten bağlı!")
-                return True
-            
-            # MT5'i başlat
-            # Eğer login, password ve server bilgileri girilmemişse, bunları kullanma
-            init_params = {}
-            if self.login is not None:
-                init_params["login"] = self.login
-            if self.password is not None:
-                init_params["password"] = self.password  
-            if self.server is not None:
-                init_params["server"] = self.server
-            if self.timeout is not None:
-                init_params["timeout"] = self.timeout
-                
-            if not mt5.initialize(**init_params):
-                print(f"MT5 başlatılamadı! Hata kodu: {mt5.last_error()}")
-                self.connected = False
+            # Initialize MT5
+            if not mt5.initialize():
+                print_error(
+                    "MT5 başlatılamadı!",
+                    "Failed to initialize MT5!",
+                    f"Hata: {mt5.last_error()}",
+                    f"Error: {mt5.last_error()}"
+                )
                 return False
-            
-            # Başarılı bağlantıyı kontrol et
-            if mt5.terminal_info() is not None:
-                account_info = mt5.account_info()
-                if account_info is not None:
-                    print(f"MT5 bağlantısı başarılı. Hesap: {account_info.login}, Sunucu: {account_info.server}")
-                    self.connected = True
-                    return True
-                else:
-                    print("MT5 başlatıldı fakat hesap bilgisi alınamadı!")
-            
-            self.connected = False
-            return False
+
+            # Login if credentials provided
+            if self.login and self.password and self.server:
+                if not mt5.login(
+                    login=self.login,
+                    password=self.password,
+                    server=self.server
+                ):
+                    print_error(
+                        "MT5 giriş başarısız!",
+                        "MT5 login failed!",
+                        f"Hata: {mt5.last_error()}",
+                        f"Error: {mt5.last_error()}"
+                    )
+                    return False
+
+            # Get account info
+            account_info = mt5.account_info()
+            if account_info is None:
+                print_error(
+                    "Hesap bilgileri alınamadı!",
+                    "Failed to get account info!",
+                    f"Hata: {mt5.last_error()}",
+                    f"Error: {mt5.last_error()}"
+                )
+                return False
+
+            self.connected = True
+            print_success(
+                f"MT5 bağlantısı başarılı! Hesap: {account_info.login}, Sunucu: {account_info.server}",
+                f"MT5 connection successful! Account: {account_info.login}, Server: {account_info.server}"
+            )
+            return True
+
         except Exception as e:
-            print(f"MT5 bağlantı hatası: {str(e)}")
-            self.connected = False
+            print_error(
+                f"MT5 bağlantı hatası: {str(e)}",
+                f"MT5 connection error: {str(e)}"
+            )
             return False
     
     def disconnect(self):
-        """MT5 bağlantısını sonlandırır"""
-        if self.connected:
+        """MT5 bağlantısını güvenli bir şekilde sonlandırır"""
+        try:
+            if not self.connected:
+                return True  # Zaten bağlı değil
+                
+            # Açık pozisyonları kontrol et
+            positions = mt5.positions_get()
+            if positions:
+                print_warning(f"{len(positions)} açık pozisyon var.")
+            
+            # Bekleyen emirleri kontrol et
+            orders = mt5.orders_get()
+            if orders:
+                print_warning(f"{len(orders)} bekleyen emir var.")
+            
+            # MT5 bağlantısını kapat
             mt5.shutdown()
             self.connected = False
-            print("MT5 bağlantısı kapatıldı.")
+            print_info("MT5 bağlantısı güvenli bir şekilde kapatıldı.")
             return True
-        return False
+            
+        except Exception as e:
+            print_error(f"MT5 bağlantısı kapatılırken hata: {str(e)}")
+            return False
     
     def get_account_info(self):
         """Hesap bilgilerini döndürür"""
         if not self.connected and not self.connect():
-            print("MT5 bağlantısı kurulamadı, hesap bilgisi alınamıyor")
+            print_error("MT5 bağlantısı kurulamadı, hesap bilgisi alınamıyor")
             return None
         
         try:
             return mt5.account_info()
         except Exception as e:
-            print(f"Hesap bilgisi alınırken hata: {str(e)}")
+            print_error(f"Hesap bilgisi alınırken hata: {str(e)}")
             return None
     
     def symbol_info(self, symbol):
@@ -104,25 +137,25 @@ class MT5Connector:
         - symbol: İşlem yapılacak sembol (ör. "XAUUSD")
         """
         if not self.connected and not self.connect():
-            print(f"MT5 bağlantısı kurulamadı, {symbol} bilgisi alınamıyor")
+            print_error(f"MT5 bağlantısı kurulamadı, {symbol} bilgisi alınamıyor")
             return None
         
         try:
             # Sembol bilgisini al
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
-                print(f"'{symbol}' sembolü bulunamadı, sembol listede olduğundan emin olun")
+                print_error(f"'{symbol}' sembolü bulunamadı, sembol listede olduğundan emin olun")
                 return None
             
             # Sembol görünür değilse görünür yap
             if not symbol_info.visible:
                 if not mt5.symbol_select(symbol, True):
-                    print(f"'{symbol}' sembolü görünür yapılamadı, emir verilemedi")
+                    print_error(f"'{symbol}' sembolü görünür yapılamadı, emir verilemedi")
                     return False
             
             return symbol_info
         except Exception as e:
-            print(f"Sembol bilgisi alınırken hata: {str(e)}")
+            print_error(f"Sembol bilgisi alınırken hata: {str(e)}")
             return None
     
     def get_historical_data(self, symbol, timeframe, num_candles=500, start_date=None, end_date=None):
@@ -137,7 +170,7 @@ class MT5Connector:
         - end_date: Bitiş tarihi (datetime nesnesi, opsiyonel)
         """
         if not self.connected and not self.connect():
-            print(f"MT5 bağlantısı kurulamadı, {symbol} için tarihsel veri alınamıyor")
+            print_error(f"MT5 bağlantısı kurulamadı, {symbol} için tarihsel veri alınamıyor")
             return None
             
         # Zaman dilimi çeviricisi
@@ -153,7 +186,7 @@ class MT5Connector:
         }
         
         if timeframe not in tf_dict:
-            print(f"Geçersiz zaman dilimi: {timeframe}. Desteklenen değerler: {list(tf_dict.keys())}")
+            print_error(f"Geçersiz zaman dilimi: {timeframe}. Desteklenen değerler: {list(tf_dict.keys())}")
             return None
         
         mt5_timeframe = tf_dict[timeframe]
@@ -175,12 +208,12 @@ class MT5Connector:
                 # Tarihsel veri al - başlangıç tarihinden itibaren
                 rates = mt5.copy_rates_range(symbol, mt5_timeframe, start_date, end_date)
             else:
-                print("Geçersiz tarih aralığı veya mum sayısı")
+                print_error("Geçersiz tarih aralığı veya mum sayısı")
                 return None
             
             # Sonuçları kontrol et
             if rates is None or len(rates) == 0:
-                print(f"{symbol} için {timeframe} zaman diliminde veri bulunamadı")
+                print_error(f"{symbol} için {timeframe} zaman diliminde veri bulunamadı")
                 return None
             
             # DataFrame'e dönüştür
@@ -206,7 +239,7 @@ class MT5Connector:
             return df
         
         except Exception as e:
-            print(f"Tarihsel veri alınırken hata: {str(e)}")
+            print_error(f"Tarihsel veri alınırken hata: {str(e)}")
             return None
     
     def get_open_positions(self, symbol=None):
@@ -217,7 +250,7 @@ class MT5Connector:
         - symbol: İsteğe bağlı, belirli bir sembol için açık pozisyonları filtrelemek için
         """
         if not self.connected and not self.connect():
-            print("MT5 bağlantısı kurulamadı, açık pozisyonlar alınamıyor")
+            print_error("MT5 bağlantısı kurulamadı, açık pozisyonlar alınamıyor")
             return None
         
         try:
@@ -235,7 +268,7 @@ class MT5Connector:
             return df
         
         except Exception as e:
-            print(f"Açık pozisyonlar alınırken hata: {str(e)}")
+            print_error(f"Açık pozisyonlar alınırken hata: {str(e)}")
             return None
     
     def get_orders(self, symbol=None):
@@ -246,7 +279,7 @@ class MT5Connector:
         - symbol: İsteğe bağlı, belirli bir sembol için bekleyen emirleri filtrelemek için
         """
         if not self.connected and not self.connect():
-            print("MT5 bağlantısı kurulamadı, bekleyen emirler alınamıyor")
+            print_error("MT5 bağlantısı kurulamadı, bekleyen emirler alınamıyor")
             return None
         
         try:
@@ -264,7 +297,7 @@ class MT5Connector:
             return df
         
         except Exception as e:
-            print(f"Bekleyen emirler alınırken hata: {str(e)}")
+            print_error(f"Bekleyen emirler alınırken hata: {str(e)}")
             return None
     
     def place_order(self, symbol, order_type, volume, price=None, sl=None, tp=None, comment="MT5 Bot Trade"):
@@ -284,7 +317,7 @@ class MT5Connector:
         """
         # Bağlantı kontrolü
         if not self.connected and not self.connect():
-            print("MT5 bağlantısı kurulamadı, emir verilemedi")
+            print_error("MT5 bağlantısı kurulamadı, emir verilemedi")
             return False
         
         try:
@@ -292,13 +325,13 @@ class MT5Connector:
             symbol_info = self.symbol_info(symbol)
             
             if symbol_info is None:
-                print(f"'{symbol}' sembolü bulunamadı, emir verilemedi")
+                print_error(f"'{symbol}' sembolü bulunamadı, emir verilemedi")
                 return False
             
             if not symbol_info.visible:
-                print(f"'{symbol}' sembolü görünür değil, görünür yapılmaya çalışılıyor...")
+                print_warning(f"'{symbol}' sembolü görünür değil, görünür yapılmaya çalışılıyor...")
                 if not mt5.symbol_select(symbol, True):
-                    print(f"'{symbol}' sembolü görünür yapılamadı, emir verilemedi")
+                    print_error(f"'{symbol}' sembolü görünür yapılamadı, emir verilemedi")
                     return False
             
             # Emir tipi ayarları
@@ -310,7 +343,7 @@ class MT5Connector:
                 action = mt5.ORDER_TYPE_SELL
                 price_type = mt5.SYMBOL_TRADE_EXECUTION_MARKET
             else:
-                print(f"Geçersiz emir tipi: {order_type}, sadece 'BUY' veya 'SELL' destekleniyor")
+                print_error(f"Geçersiz emir tipi: {order_type}, sadece 'BUY' veya 'SELL' destekleniyor")
                 return False
             
             # Doldurma politikası ayarları
@@ -326,7 +359,7 @@ class MT5Connector:
             if price is None:
                 tick = mt5.symbol_info_tick(symbol)
                 if tick is None:
-                    print(f"'{symbol}' için fiyat bilgisi alınamadı, emir verilemedi")
+                    print_error(f"'{symbol}' için fiyat bilgisi alınamadı, emir verilemedi")
                     return False
                 
                 if action == mt5.ORDER_TYPE_BUY:
@@ -341,11 +374,11 @@ class MT5Connector:
             
             # Minimum lot kontrolü
             if volume < symbol_info.volume_min:
-                print(f"Uyarı: Hacim ({volume}) minimum değerin altında, {symbol_info.volume_min} değerine ayarlandı")
+                print_warning(f"Uyarı: Hacim ({volume}) minimum değerin altında, {symbol_info.volume_min} değerine ayarlandı")
                 volume = symbol_info.volume_min
             # Maksimum lot kontrolü
             elif volume > symbol_info.volume_max:
-                print(f"Uyarı: Hacim ({volume}) maksimum değerin üstünde, {symbol_info.volume_max} değerine ayarlandı")
+                print_warning(f"Uyarı: Hacim ({volume}) maksimum değerin üstünde, {symbol_info.volume_max} değerine ayarlandı")
                 volume = symbol_info.volume_max
             
             # Fiyatı sembolün adım büyüklüğüne göre yuvarla
@@ -375,25 +408,25 @@ class MT5Connector:
             }
             
             # Emir detaylarını yazdır
-            print("-" * 50)
-            print("Emir Detayları:")
-            print(f"Sembol: {symbol}")
-            print(f"İşlem Tipi: {order_type}")
-            print(f"Hacim: {volume}")
-            print(f"Fiyat: {price}")
+            print_info("-" * 50)
+            print_info("Emir Detayları:")
+            print_info(f"Sembol: {symbol}")
+            print_info(f"İşlem Tipi: {order_type}")
+            print_info(f"Hacim: {volume}")
+            print_info(f"Fiyat: {price}")
             if sl is not None:
-                print(f"Stop Loss: {sl}")
+                print_info(f"Stop Loss: {sl}")
             if tp is not None:
-                print(f"Take Profit: {tp}")
-            print(f"Doldurma Tipi: {filling_type}")
-            print("-" * 50)
+                print_info(f"Take Profit: {tp}")
+            print_info(f"Doldurma Tipi: {filling_type}")
+            print_info("-" * 50)
             
             # Emri gönder
             result = mt5.order_send(request)
             
             # Sonucu kontrol et
             if result is None:
-                print(f"Emir gönderilemedi, MT5 hatası: {mt5.last_error()}")
+                print_error(f"Emir gönderilemedi, MT5 hatası: {mt5.last_error()}")
                 return False
             
             if result.retcode != mt5.TRADE_RETCODE_DONE:
@@ -425,12 +458,12 @@ class MT5Connector:
                 }
                 
                 error_message = error_messages.get(result.retcode, f"Bilinmeyen hata kodu: {result.retcode}")
-                print(f"Emir başarısız oldu: {error_message}")
-                print(f"Sonuç detayları: {result}")
+                print_error(f"Emir başarısız oldu: {error_message}")
+                print_info(f"Sonuç detayları: {result}")
                 
                 # Eğer fiyat geçersizse veya doldurma politikası hatalıysa, farklı bir politika deneyin
                 if result.retcode in [mt5.TRADE_RETCODE_INVALID_FILL, mt5.TRADE_RETCODE_INVALID_PRICE]:
-                    print("Farklı bir doldurma politikası denenecek...")
+                    print_warning("Farklı bir doldurma politikası denenecek...")
                     if filling_type == mt5.ORDER_FILLING_FOK:
                         request["type_filling"] = mt5.ORDER_FILLING_IOC
                     elif filling_type == mt5.ORDER_FILLING_IOC:
@@ -438,22 +471,22 @@ class MT5Connector:
                     else:
                         request["type_filling"] = mt5.ORDER_FILLING_FOK
                     
-                    print(f"Yeni doldurma tipi: {request['type_filling']}")
+                    print_info(f"Yeni doldurma tipi: {request['type_filling']}")
                     result = mt5.order_send(request)
                     
                     if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        print("İkinci deneme başarılı! Emir gönderildi.")
-                        print(f"Emir ID: {result.order}")
+                        print_success("İkinci deneme başarılı! Emir gönderildi.")
+                        print_info(f"Emir ID: {result.order}")
                         return True
                 
                 return False
             
             # Başarılı emir
-            print(f"Emir başarıyla gönderildi! Emir ID: {result.order}")
+            print_success(f"Emir başarıyla gönderildi! Emir ID: {result.order}")
             return True
             
         except Exception as e:
-            print(f"Emir gönderilirken beklenmeyen hata: {str(e)}")
+            print_error(f"Emir gönderilirken beklenmeyen hata: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -470,7 +503,7 @@ class MT5Connector:
         Başarı durumunda True, başarısızlık durumunda False döndürür
         """
         if not self.connected and not self.connect():
-            print("MT5 bağlantısı kurulamadı, pozisyon kapatılamadı")
+            print_error("MT5 bağlantısı kurulamadı, pozisyon kapatılamadı")
             return False
         
         try:
@@ -479,7 +512,7 @@ class MT5Connector:
                 position = mt5.positions_get(ticket=ticket)
                 
                 if position is None or len(position) == 0:
-                    print(f"Bilet {ticket} için pozisyon bulunamadı")
+                    print_error(f"Bilet {ticket} için pozisyon bulunamadı")
                     return False
                 
                 position = position[0]

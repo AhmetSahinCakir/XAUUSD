@@ -12,7 +12,9 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
 
 - **Çoklu Zaman Dilimi Analizi**: 5m, 15m ve 1h grafiklerde eşzamanlı analiz
 - **Hibrit Yapay Zeka Modeli**: 
-  - LSTM ve RL modellerinin kombinasyonu
+  - LSTM ve RL modellerinin sıralı entegrasyonu
+    - LSTM modeli fiyat tahminleri yapar
+    - RL modeli LSTM tahminlerini kullanarak işlem kararları verir
   - 32 farklı özellik kullanımı
   - Optimize edilmiş model parametreleri
   - Çift yönlü LSTM ve dikkat mekanizması
@@ -139,6 +141,49 @@ Bot iki şekilde model eğitimi yapabilir:
    - Otomatik senkronizasyon
    - İlerleme takibi
 
+### 🚧 Colab Entegrasyonu - Yapılacaklar
+
+> ⚠️ **NOT**: Google Colab entegrasyonu şu anda geliştirme aşamasındadır.
+
+Tamamlanması gereken özellikler:
+1. **Notebook Güncellemeleri**:
+   - LSTM ve RL modellerinin sıralı entegrasyonu
+   - LSTM tahminlerinin RL modeline aktarılması
+   - Model performans metriklerinin genişletilmesi
+   - Hyperparameter optimizasyonu desteği
+
+2. **Veri İşleme İyileştirmeleri**:
+   - Veri ön işleme pipeline'ının güncellenmesi
+   - Feature engineering süreçlerinin otomatikleştirilmesi
+   - Veri kalitesi kontrollerinin eklenmesi
+   - Veri augmentasyon tekniklerinin uygulanması
+
+3. **Model Eğitim Geliştirmeleri**:
+   - Early stopping mekanizması
+   - Model checkpoint sistemi
+   - Cross-validation desteği
+   - Ensemble learning teknikleri
+   - Transfer learning desteği
+
+4. **Entegrasyon İyileştirmeleri**:
+   - Colab session yönetiminin geliştirilmesi
+   - Otomatik notebook yükleme/güncelleme
+   - Eğitim durumu izleme sisteminin genişletilmesi
+   - Hata yakalama ve kurtarma mekanizmaları
+
+5. **Belgelendirme ve Testler**:
+   - Detaylı API dokümantasyonu
+   - Örnek kullanım senaryoları
+   - Unit test ve integration testleri
+   - Performance benchmark testleri
+
+Bu özellikler tamamlandığında:
+- Daha stabil ve güvenilir model eğitimi
+- Daha iyi performans metrikleri
+- Daha kolay kullanım ve bakım
+- Daha güvenli veri yönetimi
+sağlanacaktır.
+
 Colab eğitimi seçildiğinde:
 1. MT5'ten veri çekilir
 2. Veri Google Drive'a yüklenir
@@ -202,7 +247,3 @@ Sorun yaşarsanız:
 7. Bellek kullanımı istatistiklerini gözden geçirin
 8. Google credentials'ın doğru olduğunu kontrol edin
 9. Drive klasör izinlerini kontrol edin
-
-## 📝 Lisans
-
-Bu proje MIT Lisansı altında lisanslanmıştır. Detaylar için `LICENSE` dosyasına bakın. 

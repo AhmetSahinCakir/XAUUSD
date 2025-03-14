@@ -4,7 +4,7 @@ import pytz
 import json
 from pathlib import Path
 from typing import Optional, Dict, List
-from config import MARKET_HOURS, MARKET_CHECK_INTERVALS
+from config.config import MARKET_HOURS, MARKET_CHECK_INTERVALS
 
 logger = logging.getLogger("TradingBot.MarketHours")
 

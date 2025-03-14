@@ -217,7 +217,7 @@ class ColabManager:
             logger.error(f"[HATA] Drive'a yükleme hatası: {str(e)}")
             return False
             
-    def start_colab_training(self):
+    def start_colab_training(self, training_params=None):
         """Colab'da eğitimi başlat"""
         try:
             logger.info("[BILGI] Colab'da eğitim başlatılıyor...")
@@ -242,7 +242,7 @@ class ColabManager:
             if not items:
                 logger.error("""
 Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
-1. 'train_models.ipynb' dosyası Google Drive'ınızda trading_bot klasöründe mevcut mu?
+1. 'train_lstm.ipynb' dosyası Google Drive'ınızda trading_bot klasöründe mevcut mu?
 2. config/colab_config.json dosyasındaki ID'ler doğru mu?
 3. Google Drive API izinleri doğru ayarlanmış mı?
 
@@ -259,8 +259,9 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
             status_data = {
                 'status': 'started',
                 'start_time': datetime.now().isoformat(),
-                'model_folder_id': trading_bot_folder_id,  # Artık trading_bot klasörünü kullan
-                'data_folder_id': trading_bot_folder_id    # Artık trading_bot klasörünü kullan
+                'model_folder_id': trading_bot_folder_id,
+                'data_folder_id': trading_bot_folder_id,
+                'training_params': training_params or {}
             }
             
             # Status dosyasını ara (trading_bot klasörü içinde)
@@ -293,7 +294,7 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
                 # Yeni dosya oluştur (trading_bot klasörü içinde)
                 file_metadata = {
                     'name': self.config['model_files']['status'],
-                    'parents': [trading_bot_folder_id]  # trading_bot klasörüne kaydet
+                    'parents': [trading_bot_folder_id]
                 }
                 media = MediaIoBaseUpload(
                     io.BytesIO(json.dumps(status_data).encode()),
@@ -311,6 +312,107 @@ Colab notebook bulunamadı! Lütfen aşağıdakileri kontrol edin:
             
         except Exception as e:
             logger.error(f"[HATA] Colab eğitim hatası: {str(e)}")
+            return False
+
+    def download_lstm_models(self):
+        """Download trained LSTM models from Drive"""
+        try:
+            trading_bot_folder_id = self.config['drive_folders'].get('trading_bot')
+            if not trading_bot_folder_id:
+                logger.error("Trading bot klasör ID'si bulunamadı!")
+                return False
+
+            # LSTM model dosyalarını trading_bot klasöründe ara
+            results = self.drive_service.files().list(
+                q=f"name contains 'lstm_model' and '{trading_bot_folder_id}' in parents and trashed = false",
+                fields="files(id, name, modifiedTime)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            files = results.get('files', [])
+            if not files:
+                logger.error("❌ LSTM model dosyaları bulunamadı")
+                return False
+            
+            success = True
+            for file in files:
+                try:
+                    # Modeli indir
+                    request = self.drive_service.files().get_media(fileId=file['id'])
+                    fh = io.BytesIO()
+                    downloader = MediaIoBaseDownload(fh, request)
+                    
+                    done = False
+                    while done is False:
+                        status, done = downloader.next_chunk()
+                    
+                    # Modeli kaydet
+                    fh.seek(0)
+                    os.makedirs('saved_models', exist_ok=True)
+                    with open(os.path.join('saved_models', file['name']), 'wb') as f:
+                        f.write(fh.read())
+                    
+                    logger.info(f"✅ LSTM model başarıyla indirildi: {file['name']}")
+                except Exception as e:
+                    logger.error(f"⚠️ LSTM model indirme hatası ({file['name']}): {str(e)}")
+                    success = False
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"⚠️ LSTM model indirme hatası: {str(e)}")
+            return False
+
+    def download_rl_model(self):
+        """Download trained RL model from Drive"""
+        try:
+            trading_bot_folder_id = self.config['drive_folders'].get('trading_bot')
+            if not trading_bot_folder_id:
+                logger.error("Trading bot klasör ID'si bulunamadı!")
+                return False
+
+            # RL model dosyasını trading_bot klasöründe ara
+            results = self.drive_service.files().list(
+                q=f"name='rl_model.zip' and '{trading_bot_folder_id}' in parents and trashed = false",
+                fields="files(id, name, modifiedTime)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            files = results.get('files', [])
+            if not files:
+                logger.error("❌ RL model dosyası bulunamadı")
+                return False
+            
+            # En son güncellenen modeli al
+            latest_model = max(files, key=lambda x: x['modifiedTime'])
+            
+            try:
+                # Modeli indir
+                request = self.drive_service.files().get_media(fileId=latest_model['id'])
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                
+                done = False
+                while done is False:
+                    status, done = downloader.next_chunk()
+                
+                # Modeli kaydet
+                fh.seek(0)
+                os.makedirs('saved_models', exist_ok=True)
+                with open(os.path.join('saved_models', 'rl_model.zip'), 'wb') as f:
+                    f.write(fh.read())
+                
+                logger.info("✅ RL model başarıyla indirildi")
+                return True
+                
+            except Exception as e:
+                logger.error(f"⚠️ RL model indirme hatası: {str(e)}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"⚠️ RL model indirme hatası: {str(e)}")
             return False
             
     def download_model(self, model_name='lstm_model.pth', save_path='saved_models/'):

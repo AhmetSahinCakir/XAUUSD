@@ -119,7 +119,8 @@ class LSTMPredictor(nn.Module):
         return torch.tanh(out) * 0.1
     
     def train_model(self, train_sequences, train_targets, val_sequences=None, val_targets=None,
-                   sample_weights=None, epochs=100, batch_size=32, learning_rate=0.001, patience=10, verbose=False):
+                   sample_weights=None, epochs=100, batch_size=32, learning_rate=0.001, patience=10, verbose=False,
+                   interrupt_check=None, checkpoint_save=None, checkpoint_interval=5):
         """
         LSTM modelini eğitir
         
@@ -134,6 +135,9 @@ class LSTMPredictor(nn.Module):
         - learning_rate: Öğrenme oranı
         - patience: Erken durdurma için sabır değeri
         - verbose: İlerleme bilgisini göster/gösterme
+        - interrupt_check: Eğitimi durdurmak için kontrol fonksiyonu
+        - checkpoint_save: Kontrol noktası kaydetme fonksiyonu
+        - checkpoint_interval: Kontrol noktası kaydetme aralığı (epoch sayısı)
         
         Dönüş:
         - Eğitim geçmişi (kayıplar)
@@ -225,6 +229,13 @@ class LSTMPredictor(nn.Module):
             # Eğitim döngüsü
             pbar = tqdm(range(epochs), desc="Eğitim", disable=not verbose)
             for epoch in pbar:
+                # Check for interrupt first
+                if interrupt_check and interrupt_check():
+                    logger.info(f"Eğitim epoch {epoch+1}/{epochs}'de durduruldu")
+                    if verbose:
+                        print(f"\nEğitim epoch {epoch+1}/{epochs}'de kullanıcı tarafından durduruldu")
+                    break
+                
                 # Bellek temizliği
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -239,6 +250,11 @@ class LSTMPredictor(nn.Module):
                 
                 # Batch döngüsü
                 for i in range(0, train_sequences.shape[0], batch_size):
+                    # Check for interrupt in batch loop too
+                    if interrupt_check and interrupt_check():
+                        logger.info(f"Eğitim batch işlemi sırasında durduruldu (epoch {epoch+1})")
+                        break
+                    
                     # Batch verilerini hazırla
                     batch_indices = indices[i:i+batch_size]
                     batch_sequences = train_sequences[batch_indices]
@@ -297,10 +313,18 @@ class LSTMPredictor(nn.Module):
                         'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
                     })
                     
+                    # Save checkpoint if specified
+                    if checkpoint_save and epoch > 0 and (epoch + 1) % checkpoint_interval == 0:
+                        checkpoint_save(self.state_dict())
+                    
                     # Erken durdurma kontrolü
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         patience_counter = 0
+                        
+                        # Save best model if specified
+                        if checkpoint_save:
+                            checkpoint_save(self.state_dict())
                     else:
                         patience_counter += 1
                     
@@ -318,6 +342,10 @@ class LSTMPredictor(nn.Module):
                         'train_acc': f'{avg_train_acc:.2%}',
                         'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
                     })
+                    
+                    # Save checkpoint if specified
+                    if checkpoint_save and epoch > 0 and (epoch + 1) % checkpoint_interval == 0:
+                        checkpoint_save(self.state_dict())
             
             # Son durumu logla
             final_message = f"Eğitim tamamlandı. Son Eğitim Kaybı: {train_losses[-1]:.6f}"

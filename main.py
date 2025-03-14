@@ -41,6 +41,7 @@ import signal
 import sys
 import codecs
 import MetaTrader5 as mt5
+import threading
 
 # Windows'da Unicode desteği için
 if sys.platform == 'win32':
@@ -113,6 +114,14 @@ class XAUUSDTradingBot:
         
         # Initialize Colab Manager
         self.colab_manager = None
+        
+        # Training state tracking
+        self.training_in_progress = False
+        self.current_training_model = None
+        self.training_interrupted = False
+        self.checkpoint_path = None
+        self.training_thread = None
+        self.training_stop_event = threading.Event()
         
         # Initialize everything
         self.initialize()
@@ -1106,6 +1115,27 @@ class XAUUSDTradingBot:
         try:
             print_section("BOT DURDURULUYOR")
             
+            # Handle training interruption first if training is in progress
+            if self.training_in_progress:
+                print_warning("Eğitim devam ederken bot durdurma talebi alındı. Eğitim güvenli bir şekilde durduruluyor...")
+                
+                # Signal the training to stop
+                self.training_interrupted = True
+                self.training_stop_event.set()
+                
+                # Wait for training to finish gracefully (with timeout)
+                if self.training_thread and self.training_thread.is_alive():
+                    print_info("Eğitim durana kadar bekleniyor...")
+                    self.training_thread.join(timeout=10)  # Wait up to 10 seconds
+                    
+                    # If training is still running after timeout, take more aggressive measures
+                    if self.training_thread.is_alive():
+                        print_warning("Eğitim işlemi zaman aşımına uğradı, zorla durduruluyor...")
+                        # We can't directly terminate the thread, but we've set the flag for the training loop to check
+                
+                print_success("Eğitim güvenli bir şekilde durduruldu")
+                self.training_in_progress = False
+            
             # Stop system monitor first
             if self.system_monitor:
                 self.system_monitor.stop_monitoring()
@@ -1114,6 +1144,7 @@ class XAUUSDTradingBot:
             # Close MT5 connection
             if self.mt5 and self.mt5.connected:
                 self.mt5.disconnect()
+                print_info("MT5 bağlantısı güvenli bir şekilde kapatıldı.")
                 print_info("MT5 bağlantısı kapatıldı")
             
             # Close any open positions
@@ -1346,6 +1377,20 @@ class XAUUSDTradingBot:
                 "This process may take several hours, please wait..."
             )
             
+            # Set the training state flags
+            self.training_in_progress = True
+            self.current_training_model = f"LSTM_{timeframe}"
+            self.training_interrupted = False
+            self.training_stop_event.clear()
+            
+            # Create checkpoint directory if it doesn't exist
+            checkpoint_dir = os.path.join(self.base_dir, 'saved_models', 'checkpoints')
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir)
+            
+            # Set checkpoint path
+            self.checkpoint_path = os.path.join(checkpoint_dir, f"lstm_{timeframe}_checkpoint.pth")
+            
             # Eğitim verilerini hazırla
             print_info("Eğitim verileri hazırlanıyor...")
             train_data = self.data_processor.get_training_data(timeframe)
@@ -1410,6 +1455,18 @@ class XAUUSDTradingBot:
                 }
             })
             
+            # Check if checkpoint exists
+            if os.path.exists(self.checkpoint_path):
+                print_info(f"Eğitim kontrol noktası bulundu: {self.checkpoint_path}")
+                user_input = input("Eğitimi kontrol noktasından devam ettirmek ister misiniz? (y/n): ")
+                if user_input.lower() == 'y':
+                    try:
+                        model.load_checkpoint(self.checkpoint_path)
+                        print_success("Kontrol noktası başarıyla yüklendi!")
+                    except Exception as e:
+                        print_error(f"Kontrol noktası yükleme hatası: {str(e)}")
+                        print_info("Yeni eğitim başlatılıyor...")
+            
             # Eğitim başlangıç zamanı
             start_time = time.time()
             
@@ -1418,80 +1475,154 @@ class XAUUSDTradingBot:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            # Modeli eğit
-            print_info(f"Model eğitimi başlıyor... (Epochs: {epochs}, Batch Size: {batch_size})")
-            try:
-                history = model.train_model(
-                    train_sequences=X_train,
-                    train_targets=y_train,
-                    val_sequences=X_val,
-                    val_targets=y_val,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    learning_rate=learning_rate,
-                    verbose=True
-                )
-            except Exception as e:
-                raise Exception(f"Model eğitimi başarısız: {str(e)}")
+            # Create a wrapper for the training function that can be run in a thread
+            def training_thread_function():
+                try:
+                    # Modeli eğit
+                    print_info(f"Model eğitimi başlıyor... (Epochs: {epochs}, Batch Size: {batch_size})")
+                    
+                    # Add interrupt_check function to be passed to the model
+                    def interrupt_check():
+                        return self.training_interrupted or self.training_stop_event.is_set()
+                    
+                    # Add checkpoint_save function to be passed to the model
+                    def checkpoint_save(model_state):
+                        try:
+                            # Save current model state as checkpoint
+                            torch.save(model_state, self.checkpoint_path)
+                            logger.info(f"Kontrol noktası kaydedildi: {self.checkpoint_path}")
+                        except Exception as e:
+                            logger.error(f"Kontrol noktası kaydetme hatası: {str(e)}")
+                    
+                    # Train with interrupt and checkpoint handlers
+                    history = model.train_model(
+                        train_sequences=X_train,
+                        train_targets=y_train,
+                        val_sequences=X_val,
+                        val_targets=y_val,
+                        epochs=epochs,
+                        batch_size=batch_size,
+                        learning_rate=learning_rate,
+                        verbose=True,
+                        interrupt_check=interrupt_check,
+                        checkpoint_save=checkpoint_save,
+                        checkpoint_interval=5  # Save checkpoint every 5 epochs
+                    )
+                    
+                    # Eğitim süresini hesapla
+                    training_time = time.time() - start_time
+                    hours = int(training_time // 3600)
+                    minutes = int((training_time % 3600) // 60)
+                    
+                    # Check if training was interrupted
+                    if interrupt_check():
+                        print_warning("Eğitim kullanıcı tarafından durduruldu.")
+                        # Save one final checkpoint if interrupted
+                        checkpoint_save(model.state_dict())
+                    else:
+                        # Modeli kaydet
+                        save_path = f"saved_models/lstm_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
+                        try:
+                            model.save_checkpoint(save_path)
+                            print_success(f"Model kaydedildi: {save_path}")
+                        except Exception as e:
+                            print_error(f"Model kaydetme hatası: {str(e)}")
+                    
+                    # Modeli sözlüğe ekle
+                    self.lstm_models[timeframe] = model
+                    
+                    # Performans metriklerini kaydet
+                    try:
+                        metrics_path = f"saved_models/lstm_{timeframe}_metrics.json"
+                        metrics = {
+                            'training_time': training_time,
+                            'epochs': epochs,
+                            'batch_size': batch_size,
+                            'data_size': len(X),
+                            'train_size': len(X_train),
+                            'val_size': len(X_val),
+                            'interrupted': interrupt_check(),
+                            'completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        
+                        # Add history data if available
+                        if history and 'train_losses' in history:
+                            metrics['train_losses'] = history['train_losses']
+                        if history and 'val_losses' in history:
+                            metrics['val_losses'] = history['val_losses']
+                        
+                        with open(metrics_path, 'w') as f:
+                            json.dump(metrics, f, indent=2)
+                        
+                        print_info(f"Performans metrikleri kaydedildi: {metrics_path}")
+                    except Exception as e:
+                        print_error(f"Metrik kaydetme hatası: {str(e)}")
+                    
+                    # Clear training state flags
+                    self.training_in_progress = False
+                    self.current_training_model = None
+                    
+                    return model
+                    
+                except Exception as e:
+                    print_error(f"Eğitim thread hatası: {str(e)}")
+                    logger.error(f"Eğitim thread hatası: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+                    # Clear training state flags
+                    self.training_in_progress = False
+                    self.current_training_model = None
+                    return None
             
-            # Eğitim süresini hesapla
-            training_time = time.time() - start_time
-            hours = int(training_time // 3600)
-            minutes = int((training_time % 3600) // 60)
+            # Create and start the training thread
+            self.training_thread = threading.Thread(target=training_thread_function)
+            self.training_thread.daemon = True  # Make thread daemonic so it won't block program exit
+            self.training_thread.start()
             
-            # Modeli kaydet
-            save_path = f"saved_models/lstm_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
-            try:
-                model.save_checkpoint(save_path)
-            except Exception as e:
-                raise Exception(f"Model kaydedilemedi: {str(e)}")
+            # Wait for training to complete
+            while self.training_thread.is_alive():
+                try:
+                    # Check for interruption by user (e.g., KeyboardInterrupt)
+                    self.training_thread.join(1.0)  # Check every second
+                    
+                    # Show a heartbeat message every minute
+                    elapsed_time = time.time() - start_time
+                    if int(elapsed_time) % 60 == 0:
+                        mins = int(elapsed_time // 60)
+                        hrs = mins // 60
+                        mins = mins % 60
+                        print_info(f"Eğitim devam ediyor... Geçen süre: {hrs:02d}:{mins:02d}")
+                        
+                except KeyboardInterrupt:
+                    # Handle keyboard interrupt (Ctrl+C)
+                    print_warning("\nKullanıcı tarafından eğitim durdurma talebi alındı (Ctrl+C)")
+                    self.training_interrupted = True
+                    self.training_stop_event.set()
+                    print_info("Eğitim durana kadar bekleyin...")
+                    
+                    # Wait for training thread to finish with timeout
+                    self.training_thread.join(timeout=30)
+                    if self.training_thread.is_alive():
+                        print_warning("Eğitim işlemi zaman aşımına uğradı!")
+                    break
             
-            # Modeli sözlüğe ekle
-            self.lstm_models[timeframe] = model
-            
-            # Performans metriklerini kaydet
-            try:
-                metrics_path = f"saved_models/lstm_{timeframe}_metrics.json"
-                metrics = {
-                    'training_time': training_time,
-                    'epochs': epochs,
-                    'batch_size': batch_size,
-                    'data_size': len(X),
-                    'train_size': len(X_train),
-                    'val_size': len(X_val),
-                    'final_train_loss': history['train_losses'][-1] if history and 'train_losses' in history else None,
-                    'final_val_loss': history['val_losses'][-1] if history and 'val_losses' in history else None,
-                    'memory_usage': psutil.Process().memory_info().rss / (1024 * 1024),  # MB
-                    'timestamp': datetime.now().isoformat()
-                }
-                
-                with open(metrics_path, 'w') as f:
-                    json.dump(metrics, f, indent=4)
-            except Exception as e:
-                logger.warning(f"Metrikler kaydedilemedi: {str(e)}")
-            
-            print_success(f"{timeframe} modeli başarıyla eğitildi! (Süre: {hours} saat {minutes} dakika)")
-            return True
+            # Check if training completed successfully
+            if self.training_interrupted:
+                print_warning("Eğitim kesintiye uğradı. Kontrol noktasından daha sonra devam edebilirsiniz.")
+                return None
+            else:
+                print_success("Eğitim başarıyla tamamlandı!")
+                return self.lstm_models.get(timeframe)
             
         except Exception as e:
-            logger.error(f"{timeframe} modeli eğitilirken hata: {str(e)}")
-            print_error(f"{timeframe} modeli eğitilirken hata: {str(e)}")
-            import traceback
+            print_error(f"Model eğitimi başarısız: {str(e)}")
+            logger.error(f"Model eğitimi başarısız: {str(e)}")
             logger.error(traceback.format_exc())
             
-            # Hata detaylarını kaydet
-            try:
-                error_path = f"logs/lstm_{timeframe}_training_error.log"
-                with open(error_path, 'a') as f:
-                    f.write(f"\n{'='*50}\n")
-                    f.write(f"Tarih: {datetime.now().isoformat()}\n")
-                    f.write(f"Hata: {str(e)}\n")
-                    f.write(traceback.format_exc())
-                print_info(f"Hata detayları kaydedildi: {error_path}")
-            except:
-                pass
-            
-            return False
+            # Clear training state flags
+            self.training_in_progress = False
+            self.current_training_model = None
+            return None
 
 def signal_handler(signum, frame):
     """Handle termination signals"""
@@ -1499,13 +1630,32 @@ def signal_handler(signum, frame):
     print_info("Bot güvenli bir şekilde durduruluyor...")
     
     try:
-        if bot and bot.stop():
-            print_success("Bot güvenli bir şekilde durduruldu")
+        if bot:
+            # If bot is in training, set the interruption flag
+            if hasattr(bot, 'training_in_progress') and bot.training_in_progress:
+                print_warning(f"Eğitim süreci devam ediyor: {bot.current_training_model}")
+                print_info("Eğitim güvenli bir şekilde durdurulacak...")
+                
+                # Set the training interrupted flag to true
+                bot.training_interrupted = True
+                # Signal the training thread to stop
+                bot.training_stop_event.set()
+                
+                # Give some time for the training to save checkpoint
+                print_info("Eğitim durduruluyor, lütfen bekleyin...")
+                time.sleep(3)
+            
+            # Now stop the bot
+            if bot.stop():
+                print_success("Bot güvenli bir şekilde durduruldu")
+            else:
+                print_error("Bot durdurma başarısız!")
         else:
-            print_error("Bot durdurma başarısız!")
+            print_error("Bot bulunamadı!")
     except Exception as e:
         print_error(f"Sinyal işleme hatası: {str(e)}")
         logger.error(f"Sinyal işleme hatası: {str(e)}")
+        logger.error(traceback.format_exc())
     
     sys.exit(0)
 

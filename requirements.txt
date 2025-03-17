@@ -16,7 +16,4 @@ pytest==7.4.0
 black==23.7.0
 pylint==2.17.5
 tqdm==4.66.1
-google-auth-oauthlib>=0.4.6
-google-auth-httplib2>=0.1.0
-google-api-python-client>=2.0.0
-requests>=2.26.0 
+requests>=2.26.0

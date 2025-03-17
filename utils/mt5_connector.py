@@ -21,7 +21,7 @@ class MT5Connector:
     MT5 API üzerinden piyasa verilerine erişim ve ticaret işlemleri için kullanılır
     """
     
-    def __init__(self, login=None, password=None, server=None, timeout=60000):
+    def __init__(self, login=None, password=None, server=None, timeout=60000, max_retries=3):
         """
         MT5 bağlantısını başlatır
         
@@ -30,54 +30,66 @@ class MT5Connector:
         - password: MT5 hesap şifresi (opsiyonel)
         - server: MT5 sunucu adı (opsiyonel)
         - timeout: Bağlantı zaman aşımı (milisaniye)
+        - max_retries: Maksimum yeniden deneme sayısı
         """
         self.login = login
         self.password = password
         self.server = server
         self.timeout = timeout
+        self.max_retries = max_retries
         self.connected = False
+        self.retry_count = 0
+        self.last_error = None
         self.connect()
     
     def connect(self):
         """Connect to MetaTrader 5"""
         try:
-            # Initialize MT5
+            # Önceki bağlantıyı temizle
+            if mt5.initialize():
+                mt5.shutdown()
+            
+            # MT5'i başlat
             if not mt5.initialize():
+                self.last_error = mt5.last_error()
                 print_error(
                     "MT5 başlatılamadı!",
                     "Failed to initialize MT5!",
-                    f"Hata: {mt5.last_error()}",
-                    f"Error: {mt5.last_error()}"
+                    f"Hata: {self.last_error}",
+                    f"Error: {self.last_error}"
                 )
-                return False
-
-            # Login if credentials provided
+                return self._handle_connection_error()
+            
+            # Giriş yap
             if self.login and self.password and self.server:
                 if not mt5.login(
                     login=self.login,
                     password=self.password,
                     server=self.server
                 ):
+                    self.last_error = mt5.last_error()
                     print_error(
                         "MT5 giriş başarısız!",
                         "MT5 login failed!",
-                        f"Hata: {mt5.last_error()}",
-                        f"Error: {mt5.last_error()}"
+                        f"Hata: {self.last_error}",
+                        f"Error: {self.last_error}"
                     )
-                    return False
+                    return self._handle_connection_error()
 
-            # Get account info
+            # Hesap bilgilerini kontrol et
             account_info = mt5.account_info()
             if account_info is None:
+                self.last_error = mt5.last_error()
                 print_error(
                     "Hesap bilgileri alınamadı!",
                     "Failed to get account info!",
-                    f"Hata: {mt5.last_error()}",
-                    f"Error: {mt5.last_error()}"
+                    f"Hata: {self.last_error}",
+                    f"Error: {self.last_error}"
                 )
-                return False
+                return self._handle_connection_error()
 
             self.connected = True
+            self.retry_count = 0
             print_success(
                 f"MT5 bağlantısı başarılı! Hesap: {account_info.login}, Sunucu: {account_info.server}",
                 f"MT5 connection successful! Account: {account_info.login}, Server: {account_info.server}"
@@ -85,11 +97,40 @@ class MT5Connector:
             return True
 
         except Exception as e:
+            self.last_error = str(e)
             print_error(
                 f"MT5 bağlantı hatası: {str(e)}",
                 f"MT5 connection error: {str(e)}"
             )
+            return self._handle_connection_error()
+    
+    def _handle_connection_error(self):
+        """Bağlantı hatalarını yönet"""
+        self.retry_count += 1
+        if self.retry_count < self.max_retries:
+            print_warning(
+                f"Bağlantı yeniden deneniyor ({self.retry_count}/{self.max_retries})...",
+                f"Retrying connection ({self.retry_count}/{self.max_retries})..."
+            )
+            time.sleep(2 ** self.retry_count)  # Exponential backoff
+            return self.connect()
+        else:
+            print_error(
+                f"Maksimum yeniden deneme sayısına ulaşıldı ({self.max_retries})",
+                f"Maximum retry count reached ({self.max_retries})"
+            )
             return False
+    
+    def ensure_connected(self):
+        """Bağlantının aktif olduğundan emin ol"""
+        if not self.connected or not mt5.terminal_info():
+            print_warning(
+                "MT5 bağlantısı kopmuş, yeniden bağlanılıyor...",
+                "MT5 connection lost, reconnecting..."
+            )
+            self.retry_count = 0
+            return self.connect()
+        return True
     
     def disconnect(self):
         """MT5 bağlantısını güvenli bir şekilde sonlandırır"""
@@ -169,12 +210,13 @@ class MT5Connector:
         - start_date: Başlangıç tarihi (datetime nesnesi, opsiyonel)
         - end_date: Bitiş tarihi (datetime nesnesi, opsiyonel)
         """
-        if not self.connected and not self.connect():
+        if not self.ensure_connected():
             print_error(f"MT5 bağlantısı kurulamadı, {symbol} için tarihsel veri alınamıyor")
             return None
             
         # Zaman dilimi çeviricisi
         tf_dict = {
+            "1m": mt5.TIMEFRAME_M1,
             "5m": mt5.TIMEFRAME_M5,
             "15m": mt5.TIMEFRAME_M15,
             "30m": mt5.TIMEFRAME_M30,
@@ -193,53 +235,46 @@ class MT5Connector:
         
         try:
             # Sembol bilgisini kontrol et
-            symbol_info = self.symbol_info(symbol)
+            symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
+                print_error(f"'{symbol}' sembolü bulunamadı")
                 return None
             
-            # Tarih kontrolü
-            if end_date is None:
-                end_date = datetime.now()
+            # Sembol seçili değilse seç
+            if not symbol_info.visible:
+                if not mt5.symbol_select(symbol, True):
+                    print_error(f"'{symbol}' sembolü seçilemedi")
+                    return None
             
-            if start_date is None and num_candles > 0:
-                # Tarihsel veri al - mumların sayısına göre
-                rates = mt5.copy_rates_from(symbol, mt5_timeframe, end_date, num_candles)
-            elif start_date is not None:
-                # Tarihsel veri al - başlangıç tarihinden itibaren
+            # Veri alımı parametrelerini hazırla
+            if start_date and end_date:
                 rates = mt5.copy_rates_range(symbol, mt5_timeframe, start_date, end_date)
             else:
-                print_error("Geçersiz tarih aralığı veya mum sayısı")
-                return None
+                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, num_candles)
             
-            # Sonuçları kontrol et
             if rates is None or len(rates) == 0:
-                print_error(f"{symbol} için {timeframe} zaman diliminde veri bulunamadı")
+                print_error(f"'{symbol}' için veri alınamadı")
                 return None
             
             # DataFrame'e dönüştür
             df = pd.DataFrame(rates)
             
-            # OHLC sütunlarını yeniden adlandır
-            df.rename(columns={
-                'time': 'time', 
-                'open': 'open',
-                'high': 'high',
-                'low': 'low',
-                'close': 'close',
-                'tick_volume': 'tick_volume'
-            }, inplace=True)
+            # Zaman dönüşümü ve index ayarı
+            df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+            df.set_index('time', inplace=True)
             
-            # Zaman sütununu datetime'a dönüştür
-            df['time'] = pd.to_datetime(df['time'], unit='s')
+            # Sütun isimlerini düzenle
+            df.columns = [col.lower() for col in df.columns]
             
-            # Veriyi sırala
-            df.sort_values('time', inplace=True)
-            df.reset_index(drop=True, inplace=True)
+            print_success(
+                f"{symbol} {timeframe} verisi alındı: {len(df)} mum",
+                f"Retrieved {symbol} {timeframe} data: {len(df)} candles"
+            )
             
             return df
-        
+            
         except Exception as e:
-            print_error(f"Tarihsel veri alınırken hata: {str(e)}")
+            print_error(f"Veri alımı sırasında hata: {str(e)}")
             return None
     
     def get_open_positions(self, symbol=None):

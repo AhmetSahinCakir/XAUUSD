@@ -20,11 +20,6 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
   - Çift yönlü LSTM ve dikkat mekanizması
   - Batch normalization ve gelişmiş dropout
   - Otomatik CUDA/CPU optimizasyonu
-  - **Google Colab Entegrasyonu**: 
-    - Otomatik model eğitimi
-    - Veri senkronizasyonu
-    - Eğitim durumu takibi
-    - Model indirme/yükleme
 - **Gelişmiş Risk Yönetimi**: 
   - Her ticaret için maksimum %1 risk
   - Maksimum %5 günlük zarar limiti
@@ -53,7 +48,6 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
 - Python 3.8+
 - MetaTrader 5
 - CUDA uyumlu GPU (opsiyonel, performans için önerilir)
-- Google hesabı (Colab entegrasyonu için)
 - Gerekli Python kütüphaneleri (`requirements.txt` dosyasında listelenmiştir)
 
 ## 🛠️ Kurulum
@@ -88,23 +82,7 @@ cp .env.example .env     # Linux/Mac için
    - MT5_SERVER: Broker sunucu adı
    - Diğer parametreleri isteğe bağlı olarak ayarlayın
 
-6. Google Cloud Console'dan API credentials oluşturun:
-   - Yeni bir proje oluşturun
-   - Google Drive API'yi etkinleştirin
-   - OAuth 2.0 credentials oluşturun
-   - İndirilen credentials dosyasını `config/credentials.json` olarak kaydedin
-
-7. Google Drive'da gerekli klasörleri oluşturun:
-   - `trading_bot` ana klasörü
-   - `models` alt klasörü (eğitilen modeller için)
-   - `data` alt klasörü (eğitim verileri için)
-
-8. `config/colab_config.json` dosyasını düzenleyin:
-   - `colab_notebook_id`: Colab notebook ID'si
-   - `drive_folders.models`: Models klasörü ID'si
-   - `drive_folders.data`: Data klasörü ID'si
-
-9. Gerekli dizinleri oluşturun:
+6. Gerekli dizinleri oluşturun:
 ```bash
 mkdir -p logs data saved_models config notebooks
 ```
@@ -122,74 +100,23 @@ Bot başlatıldığında:
 - MT5 bağlantısını kontrol eder
 - Sistem kaynaklarını izlemeye başlar
 - GPU kullanılabilirliğini kontrol eder
-- Modelleri yükler veya eğitir (Colab entegrasyonu ile)
+- Modelleri yükler veya eğitir
 - Gerçek zamanlı trading başlar
 
 ## 🤖 Model Eğitimi
 
 Bot iki şekilde model eğitimi yapabilir:
 
-1. **Yerel Eğitim**:
+1. **CPU Eğitimi**:
    - Düşük veri miktarı
-   - Hızlı eğitim
-   - Sistem kaynaklarını kullanır
+   - Yavaş eğitim
+   - Sistem kaynaklarını yoğun kullanır
 
-2. **Google Colab Eğitimi** (Önerilen):
+2. **GPU Eğitimi** (Önerilen):
    - Yüksek veri miktarı
-   - GPU hızlandırma
-   - Sistem kaynaklarını kullanmaz
-   - Otomatik senkronizasyon
-   - İlerleme takibi
-
-### 🚧 Colab Entegrasyonu - Yapılacaklar
-
-> ⚠️ **NOT**: Google Colab entegrasyonu şu anda geliştirme aşamasındadır.
-
-Tamamlanması gereken özellikler:
-1. **Notebook Güncellemeleri**:
-   - LSTM ve RL modellerinin sıralı entegrasyonu
-   - LSTM tahminlerinin RL modeline aktarılması
-   - Model performans metriklerinin genişletilmesi
-   - Hyperparameter optimizasyonu desteği
-
-2. **Veri İşleme İyileştirmeleri**:
-   - Veri ön işleme pipeline'ının güncellenmesi
-   - Feature engineering süreçlerinin otomatikleştirilmesi
-   - Veri kalitesi kontrollerinin eklenmesi
-   - Veri augmentasyon tekniklerinin uygulanması
-
-3. **Model Eğitim Geliştirmeleri**:
-   - Early stopping mekanizması
-   - Model checkpoint sistemi
-   - Cross-validation desteği
-   - Ensemble learning teknikleri
-   - Transfer learning desteği
-
-4. **Entegrasyon İyileştirmeleri**:
-   - Colab session yönetiminin geliştirilmesi
-   - Otomatik notebook yükleme/güncelleme
-   - Eğitim durumu izleme sisteminin genişletilmesi
-   - Hata yakalama ve kurtarma mekanizmaları
-
-5. **Belgelendirme ve Testler**:
-   - Detaylı API dokümantasyonu
-   - Örnek kullanım senaryoları
-   - Unit test ve integration testleri
-   - Performance benchmark testleri
-
-Bu özellikler tamamlandığında:
-- Daha stabil ve güvenilir model eğitimi
-- Daha iyi performans metrikleri
-- Daha kolay kullanım ve bakım
-- Daha güvenli veri yönetimi
-sağlanacaktır.
-
-Colab eğitimi seçildiğinde:
-1. MT5'ten veri çekilir
-2. Veri Google Drive'a yüklenir
-3. Colab'da eğitim başlatılır
-4. Eğitim durumu izlenir
-5. Model indirilir ve kullanıma hazır hale gelir
+   - Hızlı eğitim
+   - GPU kaynaklarını kullanır
+   - CUDA desteği gerektirir
 
 ## ⚙️ Yapılandırma
 
@@ -200,7 +127,6 @@ Temel parametreler `.env` dosyasında ayarlanabilir:
 
 Gelişmiş parametreler:
 - `config.py`: Model ve sistem parametreleri
-- `config/colab_config.json`: Colab entegrasyon ayarları
 
 ## 📊 İzleme ve Raporlama
 
@@ -224,7 +150,6 @@ Bot şu durumlarda otomatik olarak yeniden bağlanır:
 - Kritik hatalar oluştuğunda
 - NaN gradient değerleri tespit edildiğinde
 - Veri doğrulama hataları oluştuğunda
-- Colab bağlantısı kesildiğinde
 
 ## ⚠️ Risk Uyarısı
 
@@ -245,5 +170,3 @@ Sorun yaşarsanız:
 5. Model performans metriklerini inceleyin
 6. GPU kullanılabilirliğini kontrol edin
 7. Bellek kullanımı istatistiklerini gözden geçirin
-8. Google credentials'ın doğru olduğunu kontrol edin
-9. Drive klasör izinlerini kontrol edin

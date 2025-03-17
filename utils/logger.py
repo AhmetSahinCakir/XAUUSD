@@ -18,11 +18,30 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
+def delete_existing_logs():
+    """
+    Mevcut log dosyalarını siler
+    """
+    try:
+        if os.path.exists('logs'):
+            for file in os.listdir('logs'):
+                if file.endswith('.log'):
+                    file_path = os.path.join('logs', file)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f"Log dosyası silinirken hata: {str(e)}")
+    except Exception as e:
+        print(f"Log dosyaları silinirken hata: {str(e)}")
+
 def setup_logger():
     """
     Configures and returns the main logger.
     Uses LOGGING_CONFIG from config/config.py.
     """
+    # Delete existing log files
+    delete_existing_logs()
+    
     # Create logs directory
     if not os.path.exists('logs'):
         os.makedirs('logs')

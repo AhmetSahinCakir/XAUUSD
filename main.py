@@ -25,7 +25,6 @@ from utils.logger import (
 setup_logger()
 
 # Diğer modülleri import et
-from utils.colab_manager import ColabManager
 from models.lstm_model import LSTMPredictor
 from models.rl_model import RLTrader
 from config.config import MODEL_CONFIG, TRADING_CONFIG, MARKET_HOURS, MARKET_CHECK_INTERVALS, DATA_CONFIG, MT5_CONFIG
@@ -60,25 +59,6 @@ class XAUUSDTradingBot:
             os.makedirs(config_dir)
             print_info("Config dizini oluşturuldu")
         
-        # Check for required config files
-        required_files = {
-            'credentials.json': 'Google Cloud credentials',
-            'colab_config.json': 'Colab configuration'
-        }
-        
-        missing_files = []
-        for file, description in required_files.items():
-            if not os.path.exists(os.path.join(config_dir, file)):
-                missing_files.append(f"{file} ({description})")
-        
-        if missing_files:
-            print_warning("Eksik konfigürasyon dosyaları tespit edildi:")
-            for file in missing_files:
-                print(f"  • {file}")
-            print("\nLütfen eksik dosyaları config/ dizinine ekleyin.")
-            print("Detaylı bilgi için README.md dosyasına bakın.")
-            sys.exit(1)
-        
         # Setup MT5 connector
         self.mt5 = None
         
@@ -111,9 +91,6 @@ class XAUUSDTradingBot:
         
         # Bot durumu
         self.is_running = False
-        
-        # Initialize Colab Manager
-        self.colab_manager = None
         
         # Training state tracking
         self.training_in_progress = False
@@ -333,6 +310,20 @@ class XAUUSDTradingBot:
                 
             # Initialize data processor
             self.data_processor = DataProcessor(mt5_connector=self.mt5)
+            
+            # Veri işleme testi
+            print_info("Veri işleme testi yapılıyor...")
+            test_data = self.mt5.get_historical_data("XAUUSD", "5m", num_candles=100)
+            if test_data is None:
+                print_error("Test verisi alınamadı!")
+                return False
+            
+            processed_data = self.data_processor.process_data(test_data, "5m")
+            if processed_data is None:
+                print_error("Veri işleme başarısız!")
+                return False
+            
+            print_success("Veri işleme testi başarılı!")
             
             # Initialize risk manager with account balance
             self.risk_manager = RiskManager(account_info.balance)
@@ -619,383 +610,129 @@ class XAUUSDTradingBot:
 
     def train_models(self):
         """Modelleri eğit"""
-        print_section("MODEL EĞİTİMİ BAŞLATILIYOR")
-
-        print_info("Eğitim yöntemi seçin:")
-        print("\n" + "-"*50)
-        print("1) Google Colab (Hızlı, GPU destekli)")
-        print("2) Yerel Bilgisayar (Yavaş, CPU)")
-        print("-"*50 + "\n")
+        print_section("MODEL EĞİTİMİ")
+        print("Eğitim seçenekleri:")
+        print("1) Yerel (CPU)")
+        print("2) Yerel (GPU)")
         
-        while True:
-            choice = input("Seçiminiz (1/2): ").strip()
-            if choice in ['1', '2']:
-                break
-            print_warning("Lütfen geçerli bir seçim yapın (1 veya 2)")
-
-        print_info("\nEğitilecek modelleri seçin:")
-        print("\n" + "-"*50)
+        choice = input("\nSeçiminiz (1/2): ").strip()
+        
+        # Model seçimi
+        print_section("MODEL SEÇİMİ")
         print("1) Sadece LSTM")
         print("2) Sadece RL")
-        print("3) Her ikisi de")
-        print("-"*50 + "\n")
+        print("3) LSTM + RL (Önerilen)")
         
-        while True:
-            model_choice = input("Seçiminiz (1/2/3): ").strip()
-            if model_choice in ['1', '2', '3']:
-                break
-            print_warning("Lütfen geçerli bir seçim yapın (1, 2 veya 3)")
+        model_choice = input("\nSeçiminiz (1/2/3): ").strip()
+        
+        if model_choice not in ['1', '2', '3']:
+            print_error("Geçersiz model seçimi!")
+            return False
 
         if choice == '1':
-            print_section("GOOGLE COLAB EĞİTİMİ SEÇİLDİ")
-            print_success("Avantajlar:")
-            print("  • Daha hızlı eğitim (GPU kullanımı)")
-            print("  • Bilgisayarınızı yormaz")
-            print("  • Eğitim sırasında bilgisayarınızı kullanabilirsiniz")
-            
-            print_warning("Gereksinimler:")
-            print("  • Google hesabı")
-            print("  • İnternet bağlantısı")
-            print("  • credentials.json dosyası")
-            print("\n" + "-"*50)
-            
-            success = self._train_models_colab(model_choice)
-            if not success:
-                print_section("MODEL EĞİTİMİ BAŞARISIZ")
-                print_error("Google Colab üzerinde model eğitimi başarısız oldu!")
-                print_info("Lütfen hata mesajlarını kontrol edin ve tekrar deneyin.")
-                print_info("Alternatif olarak yerel eğitimi deneyebilirsiniz.")
-                return False
-            # Eğitim tamamlandıktan sonra clear_existing_models'i False yap
-            self.clear_existing_models = False
-            return True
+            # CPU eğitimi
+            device = torch.device('cpu')
         else:
-            print_section("YEREL EĞİTİM SEÇİLDİ")
-            print_success("Avantajlar:")
-            print("  • İnternet bağlantısı gerekmez")
-            print("  • Google hesabı gerekmez")
-            
-            print_warning("Dikkat:")
-            print("  • Eğitim süresi uzun olabilir")
-            print("  • Bilgisayarınız yoğun çalışacak")
-            print("  • Eğitim sırasında bilgisayarınız yavaşlayabilir")
-            print("\n" + "-"*50)
-            
-            success = self._train_models_local(model_choice)
-            if not success:
-                print_section("MODEL EĞİTİMİ BAŞARISIZ")
-                print_error("Yerel bilgisayarda model eğitimi başarısız oldu!")
-                print_info("Lütfen hata mesajlarını kontrol edin ve tekrar deneyin.")
-                print_info("Sistem kaynaklarınız yetersiz olabilir, Google Colab eğitimini deneyebilirsiniz.")
-                return False
-            return True
+            # GPU eğitimi
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+                print_success("GPU kullanılacak")
+            else:
+                print_warning("GPU bulunamadı, CPU kullanılacak")
+                device = torch.device('cpu')
 
-    def _train_models_colab(self, model_choice='3'):
-        """Google Colab üzerinde modelleri eğit"""
-        try:
-            print_section("COLAB EĞİTİMİ BAŞLATILIYOR")
-            print_info("Google Colab üzerinde model eğitimi başlatılıyor...")
+        # Eğitim verilerini hazırla
+        print_info("Eğitim verileri hazırlanıyor...")
+        train_data = self.data_processor.get_training_data()
+        
+        # Veri kontrolü
+        if train_data is None:
+            print_error("Eğitim verisi alınamadı!")
+            return False
             
-            # Colab bağlantısını kontrol et
-            if not self.colab_manager:
-                print_error("Colab yöneticisi başlatılmamış!")
-                return False
+        # Veri kalitesi kontrolü
+        if len(train_data) == 0:
+            print_error("Eğitim verisi boş!")
+            return False
+            
+        # Eksik veri kontrolü
+        if train_data.isnull().values.any():
+            missing_count = train_data.isnull().sum().sum()
+            print_warning(f"{missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
+            train_data = train_data.fillna(method='ffill').fillna(method='bfill')
+
+        # LSTM modellerini eğit
+        if model_choice in ['1', '3']:
+            print_section("LSTM MODELLERİ EĞİTİMİ")
+            
+            # LSTM eğitimini başlat
+            print_info("LSTM eğitimi başlatılıyor...")
             
             # Eğitim verilerini hazırla
-            print_info("Eğitim verileri hazırlanıyor...")
-            train_data = self.data_processor.get_training_data()
+            sequences = self.data_processor.prepare_sequences(
+                train_data,
+                MODEL_CONFIG['training']['sequence_length']
+            )
             
-            # Veri kalitesi kontrolü
-            if train_data.isnull().values.any():
-                missing_count = train_data.isnull().sum().sum()
-                print_warning(f"{missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
-                train_data = train_data.fillna(method='ffill').fillna(method='bfill')
+            # LSTM modelini oluştur ve eğit
+            lstm_model = LSTMPredictor(config=MODEL_CONFIG['lstm'])
+            lstm_model.to(device)
             
-            # Verileri Google Drive'a yükle
-            print_info("Veriler Google Drive'a yükleniyor...")
-            if not self.colab_manager.upload_training_data(train_data):
-                raise Exception("Veriler Google Drive'a yüklenemedi!")
-            
-            # LSTM modellerini eğit
-            if model_choice in ['1', '3']:
-                print_section("LSTM MODELLERİ EĞİTİMİ")
-                
-                # Colab'da LSTM eğitimini başlat
-                print_info("LSTM eğitimi başlatılıyor...")
-                if not self.colab_manager.train_lstm_models():
-                    raise Exception("LSTM eğitimi başlatılamadı!")
-                
-                # Eğitim durumunu izle
-                print_info("Eğitim durumu izleniyor...")
-                while not self.colab_manager.is_lstm_training_complete():
-                    status = self.colab_manager.get_training_status()
-                    print_info(f"LSTM Eğitim Durumu: {status}")
-                    time.sleep(60)  # 1 dakika bekle
-                
-                # LSTM modellerini indir
-                if model_choice in ['1', '3']:
-                    if not self.colab_manager.download_lstm_models():
-                        raise Exception("LSTM modelleri indirilemedi!")
-                    print_success("LSTM modelleri başarıyla indirildi!")
-            
-            # RL modelini eğit
-            if model_choice in ['2', '3']:
-                print_section("RL MODEL EĞİTİMİ")
-                
-                # LSTM modelinin varlığını kontrol et
-                lstm_model = self.lstm_models.get('5m')
-                if lstm_model is None:
-                    raise Exception("RL için gerekli LSTM modeli bulunamadı!")
-                
-                # LSTM tahminlerini ekle
-                print_info("LSTM tahminleri ekleniyor...")
-                sequences = self.data_processor.prepare_sequences(
-                    train_data,
-                    MODEL_CONFIG['training']['sequence_length']
+            try:
+                lstm_model.train_model(
+                    sequences,
+                    train_data['target'].values,
+                    epochs=MODEL_CONFIG['training']['epochs'],
+                    batch_size=MODEL_CONFIG['training']['batch_size'],
+                    learning_rate=MODEL_CONFIG['training']['learning_rate']
                 )
-                with torch.no_grad():
-                    lstm_predictions = lstm_model(sequences).numpy()
-                train_data['lstm_prediction'] = lstm_predictions
-                
-                # Güncellenmiş veriyi Google Drive'a yükle
-                print_info("Güncellenmiş veriler Google Drive'a yükleniyor...")
-                if not self.colab_manager.upload_training_data(train_data, filename='train_data_with_lstm.csv'):
-                    raise Exception("Güncellenmiş veriler yüklenemedi!")
-                
-                # Colab'da RL eğitimini başlat
-                print_info("RL eğitimi başlatılıyor...")
-                if not self.colab_manager.train_rl_model():
-                    raise Exception("RL eğitimi başlatılamadı!")
-                
-                # Eğitim durumunu izle
-                print_info("Eğitim durumu izleniyor...")
-                while not self.colab_manager.is_rl_training_complete():
-                    status = self.colab_manager.get_training_status()
-                    print_info(f"RL Eğitim Durumu: {status}")
-                    time.sleep(60)  # 1 dakika bekle
-                
-                # RL modelini indir
-                if not self.colab_manager.download_rl_model():
-                    raise Exception("RL modeli indirilemedi!")
-                print_success("RL modeli başarıyla indirildi!")
+                print_success("LSTM eğitimi tamamlandı!")
+            except Exception as e:
+                print_error(f"LSTM eğitimi sırasında hata: {str(e)}")
+                return False
+        
+        # RL modelini eğit
+        if model_choice in ['2', '3']:
+            print_section("RL MODEL EĞİTİMİ")
             
-            # Modelleri yükle
-            if model_choice in ['1', '3']:
-                if not self.load_or_create_models():
-                    raise Exception("LSTM modelleri yüklenemedi!")
+            # LSTM modelinin varlığını kontrol et
+            lstm_model = self.lstm_models.get('5m')
+            if lstm_model is None:
+                print_error("RL için gerekli LSTM modeli bulunamadı!")
+                return False
             
-            if model_choice in ['2', '3']:
-                try:
-                    # RL modelini yükle
-                    lstm_model = self.lstm_models.get('5m')
-                    if lstm_model is None:
-                        raise Exception("RL için gerekli LSTM modeli bulunamadı!")
-                    
-                    env_params = {
-                        'df': self.data_processor.get_latest_data(),
-                        'window_size': MODEL_CONFIG['rl']['window_size'],
-                        'initial_balance': self.risk_manager.initial_balance if self.risk_manager else 10000.0,
-                        'commission': TRADING_CONFIG['commission']
-                    }
-                    
-                    self.rl_trader = RLTrader(lstm_model=lstm_model, env_params=env_params)
-                    self.rl_trader.load("saved_models/rl_model.zip")
-                    print_success("RL modeli başarıyla yüklendi!")
-                except Exception as e:
-                    raise Exception(f"RL modeli yüklenemedi: {str(e)}")
+            # LSTM tahminlerini ekle
+            print_info("LSTM tahminleri ekleniyor...")
+            sequences = self.data_processor.prepare_sequences(
+                train_data,
+                MODEL_CONFIG['training']['sequence_length']
+            )
+            with torch.no_grad():
+                lstm_predictions = lstm_model(sequences).numpy()
+            train_data['lstm_prediction'] = lstm_predictions
             
-            print_section("COLAB EĞİTİMİ TAMAMLANDI")
-            print_success("Tüm modeller başarıyla eğitildi ve yüklendi!")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Colab eğitimi hatası: {str(e)}")
-            print_error(f"Colab eğitimi hatası: {str(e)}")
-            return False
+            # RL modelini oluştur ve eğit
+            try:
+                env_params = {
+                    'df': train_data,
+                    'window_size': MODEL_CONFIG['rl']['window_size'],
+                    'initial_balance': self.risk_manager.initial_balance if self.risk_manager else 10000.0,
+                    'commission': TRADING_CONFIG['commission']
+                }
+                
+                self.rl_trader = RLTrader(lstm_model=lstm_model, env_params=env_params)
+                self.rl_trader.train(
+                    total_timesteps=MODEL_CONFIG['rl']['total_timesteps'],
+                    log_interval=MODEL_CONFIG['rl']['log_interval']
+                )
+                print_success("RL eğitimi tamamlandı!")
+            except Exception as e:
+                print_error(f"RL eğitimi sırasında hata: {str(e)}")
+                return False
 
-    def _train_models_local(self, model_choice='3'):
-        """Train models locally"""
-        try:
-            print_section(
-                "YEREL EĞİTİM BAŞLATILIYOR",
-                "STARTING LOCAL TRAINING"
-            )
-            print_info(
-                "Yerel bilgisayarda model eğitimi başlatılıyor...",
-                "Starting model training on local computer..."
-            )
-            
-            # Başarılı eğitilen model sayısı
-            successful_models = 0
-            
-            # LSTM Eğitimi
-            if model_choice in ['1', '3']:
-                print_section("LSTM MODEL EĞİTİMİ")
-                # Her zaman dilimi için ayrı eğitim
-                for timeframe in self.timeframes:
-                    print_section(f"{timeframe.upper()} MODELİ EĞİTİMİ")
-                    print_info(f"{timeframe} zaman dilimi için LSTM modeli eğitiliyor...", f"Training LSTM model for {timeframe} timeframe...")
-                    print_warning("Bu işlem birkaç saat sürebilir, lütfen bekleyin...", "This process may take several hours, please wait...")
-                    
-                    try:
-                        success = self.train_lstm_model(timeframe)
-                        if success:
-                            print_success(f"{timeframe} modeli başarıyla eğitildi!")
-                            successful_models += 1
-                        else:
-                            print_error(f"{timeframe} modeli eğitimi başarısız oldu!")
-                            print_info("Diğer zaman dilimlerine geçiliyor...")
-                    except Exception as e:
-                        logger.error(f"{timeframe} modeli eğitilirken hata: {str(e)}")
-                        print_error(f"{timeframe} modeli eğitilirken hata: {str(e)}")
-                        print_info("Diğer zaman dilimlerine geçiliyor...")
-            
-            # RL Eğitimi
-            if model_choice in ['2', '3']:
-                print_section("RL MODEL EĞİTİMİ")
-                print_info("RL modeli eğitimi hazırlanıyor...")
-                
-                try:
-                    # Sistem kaynaklarını kontrol et
-                    memory_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)  # GB
-                    if memory_available < 4:  # 4GB minimum gereksinim
-                        print_warning(f"Düşük bellek: {memory_available:.1f}GB kullanılabilir. Performans düşük olabilir.")
-                    
-                    # LSTM modelini kontrol et (5 dakikalık)
-                    print_info("LSTM modeli kontrol ediliyor...")
-                    lstm_model = self.lstm_models.get('5m')
-                    if lstm_model is None:
-                        print_warning("5 dakikalık LSTM modeli bulunamadı, önce LSTM modelini eğitin!")
-                        return False
-                    
-                    # Veri hazırlığı
-                    print_info("Eğitim verisi hazırlanıyor...")
-                    train_data = self.prepare_training_data()
-                    if train_data is None:
-                        raise Exception("Eğitim verisi hazırlanamadı!")
-                    
-                    print_info("Veri kalitesi kontrol ediliyor...")
-                    # Veri kalitesi kontrolü
-                    if train_data.isnull().values.any():
-                        missing_count = train_data.isnull().sum().sum()
-                        print_warning(f"{missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
-                        train_data = train_data.fillna(method='ffill').fillna(method='bfill')
-                    
-                    # LSTM tahminlerini ekle
-                    print_info("LSTM tahminleri ekleniyor...")
-                    sequences = self.data_processor.prepare_sequences(
-                        train_data,
-                        MODEL_CONFIG['training']['sequence_length']
-                    )
-                    with torch.no_grad():
-                        lstm_predictions = lstm_model(sequences).numpy()
-                    train_data['lstm_prediction'] = lstm_predictions
-                    
-                    # RL çevresini oluştur
-                    print_info("RL eğitim ortamı hazırlanıyor...")
-                    env_params = {
-                        'df': train_data,
-                        'window_size': MODEL_CONFIG['rl']['window_size'],
-                        'initial_balance': self.risk_manager.initial_balance if self.risk_manager else 10000.0,
-                        'commission': TRADING_CONFIG['commission']
-                    }
-                    
-                    # RL modelini oluştur
-                    print_info("RL modeli oluşturuluyor...")
-                    self.rl_trader = RLTrader(lstm_model=lstm_model, env_params=env_params)
-                    
-                    # Eğitim parametrelerini al
-                    total_timesteps = MODEL_CONFIG['rl'].get('total_timesteps', 100000)
-                    print_info(f"Toplam eğitim adımı: {total_timesteps:,}")
-                    
-                    # Eğitim başlangıç zamanı
-                    start_time = time.time()
-                    
-                    # Eğitimi başlat
-                    print_section("RL MODEL EĞİTİMİ BAŞLIYOR")
-                    print_warning("Bu işlem birkaç saat sürebilir. İlerleme düzenli olarak gösterilecek...")
-                    
-                    # Bellek temizliği
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    
-                    # Eğitimi başlat
-                    self.rl_trader.train(train_data, total_timesteps=total_timesteps)
-                    
-                    # Eğitim süresini hesapla
-                    training_time = time.time() - start_time
-                    hours = int(training_time // 3600)
-                    minutes = int((training_time % 3600) // 60)
-                    
-                    print_success(f"RL model eğitimi tamamlandı! (Süre: {hours} saat {minutes} dakika)")
-                    
-                    # Modeli kaydet
-                    print_info("Model kaydediliyor...")
-                    save_path = "saved_models/rl_model.zip"
-                    self.rl_trader.save(save_path)
-                    print_success("RL model başarıyla kaydedildi!")
-                    
-                    # Performans metriklerini kaydet
-                    metrics_path = "saved_models/rl_metrics.json"
-                    metrics = {
-                        'training_time': training_time,
-                        'total_timesteps': total_timesteps,
-                        'memory_usage': psutil.Process().memory_info().rss / (1024 * 1024),  # MB
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    
-                    with open(metrics_path, 'w') as f:
-                        json.dump(metrics, f, indent=4)
-                    
-                    print_info(f"Performans metrikleri kaydedildi: {metrics_path}")
-                    successful_models += 1
-                    
-                except Exception as e:
-                    logger.error(f"RL model eğitimi hatası: {str(e)}")
-                    print_error(f"RL model eğitimi hatası: {str(e)}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    
-                    # Hata detaylarını kaydet
-                    error_path = "logs/rl_training_error.log"
-                    with open(error_path, 'a') as f:
-                        f.write(f"\n{'='*50}\n")
-                        f.write(f"Tarih: {datetime.now().isoformat()}\n")
-                        f.write(f"Hata: {str(e)}\n")
-                        f.write(traceback.format_exc())
-                    
-                    print_info(f"Hata detayları kaydedildi: {error_path}")
-                finally:
-                    # Bellek temizliği
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-            
-            # En az bir model başarıyla eğitildi mi kontrol et
-            if model_choice == '1' and not any(self.lstm_models.values()):
-                print_section("EĞİTİM BAŞARISIZ")
-                print_error("Hiçbir LSTM modeli başarıyla eğitilemedi!")
-                return False
-            elif model_choice == '2' and self.rl_trader is None:
-                print_section("EĞİTİM BAŞARISIZ")
-                print_error("RL modeli başarıyla eğitilemedi!")
-                return False
-            elif model_choice == '3' and not any(self.lstm_models.values()) and self.rl_trader is None:
-                print_section("EĞİTİM BAŞARISIZ")
-                print_error("Hiçbir model başarıyla eğitilemedi!")
-                return False
-                
-            print_section("EĞİTİM TAMAMLANDI")
-            print_success(f"Toplam {successful_models} model başarıyla eğitildi!")
-            # Eğitim tamamlandıktan sonra clear_existing_models'i False yap
-            self.clear_existing_models = False
-            return successful_models > 0
-            
-        except Exception as e:
-            logger.error(f"Model eğitimi hatası: {str(e)}")
-            print_error(f"Model eğitimi hatası: {str(e)}")
-            return False
+        print_section("MODEL EĞİTİMİ TAMAMLANDI")
+        print_success("Tüm modeller başarıyla eğitildi!")
+        return True
 
     def execute_trade(self, timeframe, lstm_pred, rl_action):
         """Execute trades based on model predictions"""

@@ -22,10 +22,10 @@ class LSTMPredictor(nn.Module):
         super(LSTMPredictor, self).__init__()
         
         # Config parametrelerini al
-        self.input_size = config['lstm']['input_size']
-        self.hidden_size = config['lstm']['hidden_size']
-        self.num_layers = config['lstm']['num_layers']
-        self.dropout = config['lstm']['dropout']
+        self.input_size = config['input_size']
+        self.hidden_size = config['hidden_size']
+        self.num_layers = config['num_layers']
+        self.dropout = config['dropout']
         
         # CUDA kullanılabilirliğini kontrol et
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -44,20 +44,23 @@ class LSTMPredictor(nn.Module):
         # Batch Normalization
         self.batch_norm = nn.BatchNorm1d(
             self.hidden_size * 2,
-            momentum=config['batch_norm']['momentum'],
-            eps=config['batch_norm']['eps']
+            momentum=MODEL_CONFIG['batch_norm']['momentum'],
+            eps=MODEL_CONFIG['batch_norm']['eps']
         )
         
         # Attention mekanizması
-        attention_dims = config['attention']['dims']
+        attention_config = MODEL_CONFIG.get('attention', {
+            'dims': [512, 128, 1],
+            'dropout': 0.2
+        })
         self.attention = nn.Sequential(
-            nn.Linear(self.hidden_size * 2, attention_dims[0]),
-            nn.LayerNorm(attention_dims[0]),
+            nn.Linear(self.hidden_size * 2, attention_config['dims'][0]),
+            nn.LayerNorm(attention_config['dims'][0]),
             nn.ReLU(),
-            nn.Dropout(config['attention']['dropout']),
-            nn.Linear(attention_dims[0], attention_dims[1]),
+            nn.Dropout(attention_config['dropout']),
+            nn.Linear(attention_config['dims'][0], attention_config['dims'][1]),
             nn.Tanh(),
-            nn.Linear(attention_dims[1], attention_dims[2])
+            nn.Linear(attention_config['dims'][1], attention_config['dims'][2])
         )
         
         # Fully connected katmanlar
@@ -479,21 +482,11 @@ class LSTMPredictor(nn.Module):
             # Yeni bir model oluştur
             model = LSTMPredictor(
                 config={
-                    'lstm': {
-                        'input_size': input_size,
-                        'hidden_size': hidden_size,
-                        'num_layers': num_layers,
-                        'dropout': dropout_rate,
-                        'bidirectional': True
-                    },
-                    'batch_norm': {
-                        'momentum': 0.9,
-                        'eps': 1e-5
-                    },
-                    'attention': {
-                        'dims': [hidden_size * 2, 64, 1],
-                        'dropout': 0.1
-                    }
+                    'input_size': input_size,
+                    'hidden_size': hidden_size,
+                    'num_layers': num_layers,
+                    'dropout': dropout_rate,
+                    'bidirectional': True
                 }
             )
             

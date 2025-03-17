@@ -123,19 +123,17 @@ symbols.sel
 *.zip
 *.pickle
 *.model
-test_*.py
-debug_*.py
 config_personal.py 
 
-# Colab and training data
-colab/
+# Training data
 training_data/
 debug_results.json
 
-# Google API
-config/credentials.json
-config/token.json
-*.pickle
-
 # MT5
 *.set
+
+# Test and Debug Files
+test_results.json
+
+# Cursor specific
+.cursor/

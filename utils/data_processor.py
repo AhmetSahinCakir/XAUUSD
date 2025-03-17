@@ -6,6 +6,7 @@ import logging
 import ta
 import pytz
 from datetime import datetime, time
+from functools import lru_cache
 
 logger = logging.getLogger("TradingBot.DataProcessor")
 
@@ -18,10 +19,9 @@ class DataProcessor:
     def __init__(self, mt5_connector=None):
         """
         Veri işleme sınıfı başlatıcı
-        
-        Args:
-            mt5_connector: MT5Connector instance (optional)
         """
+        self.logger = logging.getLogger('TradingBot.DataProcessor')
+        
         # MT5 bağlantısı
         if mt5_connector is None:
             from utils.mt5_connector import MT5Connector
@@ -36,52 +36,72 @@ class DataProcessor:
         else:
             self.mt5_connector = mt5_connector
         
-        # Özellik isimleri
-        self.feature_names = [
-            'open', 'high', 'low', 'close', 'volume',  # Fiyat ve hacim
-            'rsi', 'macd', 'macd_signal', 'macd_hist',  # Momentum göstergeleri
-            'sma_10', 'sma_20', 'sma_50',  # Hareketli ortalamalar
-            'ema_10', 'ema_20', 'ema_50',
-            'upper_band', 'middle_band', 'lower_band',  # Bollinger bantları
-            'atr', 'adx', 'cci',  # Trend göstergeleri
-            'stoch_k', 'stoch_d',  # Stokastik osilatör
-            'williams_r',  # Williams %R
-            'obv',  # On Balance Volume
-            'mfi',  # Money Flow Index
-            'roc',  # Rate of Change
-            'gap_size',  # Fiyat boşluğu
-            'session_asian', 'session_london', 'session_ny',  # Seans bilgileri
-            'is_gap'  # Boşluk var mı?
+        # Temel özellik grupları
+        self.price_features = ['open', 'high', 'low', 'close']
+        self.volume_features = ['tick_volume']
+        self.technical_indicators = [
+            'rsi', 'macd', 'macd_signal', 'atr',
+            'bb_upper', 'bb_lower', 'sma_20'
         ]
+        self.session_features = ['asian_session', 'london_session', 'ny_session']
+        self.quality_features = ['has_gap', 'gap_size']
+        
+        # Tüm özellikleri birleştir
+        self.all_features = (
+            self.price_features +
+            self.volume_features +
+            self.technical_indicators +
+            self.quality_features +
+            self.session_features
+        )
+        
+        # Özellik sayısı
+        self.n_features = len(self.all_features)
+        logger.info(f"DataProcessor başlatıldı. Toplam özellik sayısı: {self.n_features}")
+        
+        # Scaler
+        self.feature_scaler = MinMaxScaler()
+        self.feature_scaler_fitted = False
+        
+        # Cache için LRU
+        self.cache_size = 128
+        
+        # Veri kalitesi parametreleri
+        self.quality_params = {
+            'outlier_std': 3.0,
+            'volume_spike_threshold': 5.0,
+            'gap_threshold_minutes': {
+                '5m': 10,
+                '15m': 30,
+                '1h': 120
+            },
+            'volatility_window': 20,
+            'session_buffer_minutes': 30
+        }
+        
+        # Veri alımı parametreleri
+        self.lookback_periods = {
+            '5m': 10000,
+            '15m': 5000,
+            '1h': 2000
+        }
+        
+        # Özellik isimleri ve grupları
+        self._initialize_feature_groups()
         
         # Scaler'ları başlat
-        self.price_scaler = MinMaxScaler()
-        self.volume_scaler = MinMaxScaler()
-        self.indicator_scaler = MinMaxScaler()
-        self.gap_scaler = MinMaxScaler()
+        self._initialize_scalers()
         
         # Veri çerçevesi
         self.df = None
         
         # Özellik grupları
-        self.price_features = ['open', 'high', 'low', 'close']
-        self.volume_features = ['volume']
-        self.indicator_features = [
-            'rsi', 'macd', 'macd_signal', 'macd_hist',
-            'sma_10', 'sma_20', 'sma_50',
-            'ema_10', 'ema_20', 'ema_50',
-            'upper_band', 'middle_band', 'lower_band',
-            'atr', 'adx', 'cci',
-            'stoch_k', 'stoch_d',
-            'williams_r', 'obv', 'mfi', 'roc'
-        ]
-        self.gap_features = ['gap_size']
-        self.session_features = ['session_asian', 'session_london', 'session_ny', 'is_gap']
-        
-        # Özellik sayısı
-        self.n_features = len(self.feature_names)
-        
-        logger.info(f"DataProcessor başlatıldı. Toplam özellik sayısı: {self.n_features}")
+        self.momentum_indicators = ['rsi', 'macd', 'macd_signal', 'macd_hist', 'mfi', 'roc']
+        self.trend_indicators = ['sma_10', 'sma_50', 'ema_10', 'ema_50', 'adx']
+        self.volatility_indicators = ['atr', 'bb_upper', 'bb_middle', 'bb_lower']
+        self.oscillator_indicators = ['stoch_k', 'stoch_d', 'williams_r', 'cci']
+        self.volume_indicators = ['obv']
+        self.quality_features = ['has_gap', 'gap_size', 'is_outlier', 'volume_spike', 'volatility_factor']
         
         # Scaler'lar
         self.feature_scaler = MinMaxScaler()
@@ -90,148 +110,377 @@ class DataProcessor:
         self.feature_columns = ['open', 'high', 'low', 'close', 'tick_volume']
         self.all_features = [
             'open', 'high', 'low', 'close', 'tick_volume',  # 5 price features
-            'RSI', 'MACD', 'Signal_Line', 'ATR', 'Upper_Band', 'Lower_Band', 'MA20',  # 7 technical indicators
-            'gap', 'gap_size', 'session_asian', 'session_london', 'session_ny'  # 5 yeni özellik
+            'rsi', 'macd', 'macd_signal', 'atr', 'bb_upper', 'bb_lower', 'sma_20',  # 7 technical indicators
+            'has_gap', 'gap_size', 'asian_session', 'london_session', 'ny_session'  # 5 yeni özellik
         ]  # Total 17 features + 3 account state = 20 features
         
         # Cache for technical indicators
         self.indicators_cache = {}
         self.cache_max_size = 10  # Maximum number of DataFrames to keep in cache
         
-        # Veri alımı parametreleri
-        self.lookback_periods = {
-            '5m': 10000,    # Yaklaşık 5 hafta (5 * 24 * 60 / 5 = 1440 mum/gün)
-            '15m': 5000,    # Yaklaşık 7 hafta (5 * 24 * 60 / 15 = 480 mum/gün)
-            '1h': 2000      # Yaklaşık 12 hafta (5 * 24 = 120 mum/gün)
+    def _initialize_feature_groups(self):
+        """Özellik gruplarını ve isimlerini başlatır"""
+        self.price_features = ['open', 'high', 'low', 'close']
+        self.volume_features = ['volume', 'tick_volume']
+        self.momentum_indicators = ['rsi', 'macd', 'macd_signal', 'macd_hist', 'mfi', 'roc']
+        self.trend_indicators = ['sma_10', 'sma_20', 'sma_50', 'ema_10', 'ema_20', 'ema_50', 'adx']
+        self.volatility_indicators = ['atr', 'bb_upper', 'bb_middle', 'bb_lower']
+        self.oscillator_indicators = ['stoch_k', 'stoch_d', 'williams_r', 'cci']
+        self.volume_indicators = ['obv']
+        self.session_features = ['session_asian', 'session_london', 'session_ny']
+        self.quality_features = ['has_gap', 'gap_size', 'is_outlier', 'volume_spike', 'volatility_factor']
+        
+        # Tüm özellikleri birleştir
+        self.feature_names = (
+            self.price_features +
+            self.volume_features +
+            self.momentum_indicators +
+            self.trend_indicators +
+            self.volatility_indicators +
+            self.oscillator_indicators +
+            self.volume_indicators +
+            self.session_features +
+            self.quality_features
+        )
+        
+        self.n_features = len(self.feature_names)
+
+    def _initialize_scalers(self):
+        """Scaler'ları başlatır"""
+        self.scalers = {
+            'price': MinMaxScaler(),
+            'volume': MinMaxScaler(),
+            'momentum': MinMaxScaler(),
+            'trend': MinMaxScaler(),
+            'volatility': MinMaxScaler(),
+            'oscillator': MinMaxScaler(),
+            'quality': MinMaxScaler()
+        }
+        self.scalers_fitted = {k: False for k in self.scalers.keys()}
+
+    @lru_cache(maxsize=128)
+    def calculate_adaptive_periods(self, volatility):
+        """Volatiliteye göre adaptif periyotlar hesaplar"""
+        base_periods = {
+            'rsi': 14,
+            'macd': (12, 26, 9),  # (fast, slow, signal)
+            'bb': 20,
+            'stoch': 14,
+            'atr': 14
         }
         
-    def detect_price_gaps(self, df):
+        # Volatilite faktörü (0.5 ile 1.5 arasında)
+        vol_factor = 1 + (volatility - 0.02) / 0.04  # 0.02 normal volatilite kabul edilir
+        vol_factor = max(0.5, min(1.5, vol_factor))
+        
+        return {
+            'rsi': max(5, int(base_periods['rsi'] * vol_factor)),
+            'macd': tuple(max(5, int(p * vol_factor)) for p in base_periods['macd']),
+            'bb': max(5, int(base_periods['bb'] * vol_factor)),
+            'stoch': max(5, int(base_periods['stoch'] * vol_factor)),
+            'atr': max(5, int(base_periods['atr'] * vol_factor))
+        }
+
+    def detect_outliers(self, df):
+        """Aykırı değerleri tespit et"""
+        try:
+            # Fiyat ve hacim sütunları için aykırı değerleri kontrol et
+            columns = ['open', 'high', 'low', 'close', 'tick_volume']
+            
+            # Her sütun için z-score hesapla
+            for col in columns:
+                if col in df.columns:
+                    z_score = (df[col] - df[col].mean()) / df[col].std()
+                    df[f'{col}_is_outlier'] = abs(z_score) > 3
+            
+            # Herhangi bir sütunda aykırı değer varsa işaretle
+            df['is_outlier'] = df[[f'{col}_is_outlier' for col in columns if f'{col}_is_outlier' in df.columns]].any(axis=1)
+            
+            # Geçici sütunları temizle
+            for col in columns:
+                if f'{col}_is_outlier' in df.columns:
+                    df = df.drop(f'{col}_is_outlier', axis=1)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Aykırı değer tespiti hatası: {str(e)}")
+            return df
+
+    def detect_volume_spikes(self, df):
+        """Hacim sıçramalarını tespit et"""
+        try:
+            # Hacim ortalaması ve standart sapması
+            volume_mean = df['tick_volume'].rolling(window=20).mean()
+            volume_std = df['tick_volume'].rolling(window=20).std()
+            
+            # Hacim spike'larını tespit et (3 standart sapma üzeri)
+            df['volume_spike'] = (df['tick_volume'] > (volume_mean + 3 * volume_std))
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Hacim spike tespiti hatası: {str(e)}")
+            return df
+
+    def calculate_volatility_factor(self, df):
+        """Volatilite faktörü hesaplar"""
+        returns = df['close'].pct_change()
+        volatility = returns.rolling(
+            window=self.quality_params['volatility_window'],
+            min_periods=1
+        ).std()
+        
+        # Volatilite faktörünü 0.5 ile 2 arasında normalize et
+        normalized_vol = 0.5 + (volatility - volatility.min()) / (volatility.max() - volatility.min()) * 1.5
+        return normalized_vol
+
+    def enhance_session_management(self, df):
+        """Seans bilgilerini ekle ve yönet"""
+        try:
+            # Zaman sütununu UTC'ye dönüştür
+            if not df.index.tz:
+                df.index = df.index.tz_localize('UTC')
+            
+            # Her satır için saat bilgisini al (UTC)
+            hours = df.index.hour
+            minutes = df.index.minute
+            
+            # Seans tanımları (UTC)
+            df['asian_session'] = ((hours >= 0) & (hours < 8)).astype(int)
+            df['london_session'] = ((hours >= 8) & (hours < 16)).astype(int)
+            df['ny_session'] = ((hours >= 13) & (hours < 21)).astype(int)
+            
+            # Seans geçişlerinde tampon süre ekle
+            buffer_minutes = self.quality_params['session_buffer_minutes']
+            
+            # Tampon süreleri ekle
+            df.loc[(minutes < buffer_minutes) & (df['asian_session'] == 1), 'asian_session'] = 0
+            df.loc[(minutes < buffer_minutes) & (df['london_session'] == 1), 'london_session'] = 0
+            df.loc[(minutes < buffer_minutes) & (df['ny_session'] == 1), 'ny_session'] = 0
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Seans yönetimi hatası: {str(e)}")
+            return df
+
+    def process_data(self, df, timeframe):
+        """Veriyi işle ve özellikleri hesapla"""
+        try:
+            # Veri kontrolü
+            if df is None or len(df) == 0:
+                logger.error("İşlenecek veri bulunamadı veya boş")
+                return None
+            
+            # NaN değerleri temizle
+            df = df.copy()
+            df = df.fillna(method='ffill').fillna(method='bfill')
+            
+            # Temel özellikler
+            df['returns'] = df['close'].pct_change()
+            df['volatility'] = df['returns'].rolling(window=20).std()
+            
+            # Teknik göstergeler
+            df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+            
+            macd = ta.trend.MACD(df['close'])
+            df['macd'] = macd.macd()
+            df['macd_signal'] = macd.macd_signal()
+            
+            # Bollinger Bantları
+            bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+            df['bb_upper'] = bb.bollinger_hband()
+            df['bb_lower'] = bb.bollinger_lband()
+            df['sma_20'] = bb.bollinger_mavg()
+            
+            # ATR
+            df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
+            
+            # Fiyat boşluklarını tespit et
+            df = self.detect_price_gaps(df, timeframe)
+            
+            # Seans bilgilerini ekle
+            df = self.enhance_session_management(df)
+            
+            # Hedef değişkeni hesapla
+            df['target'] = df['close'].pct_change(periods=1).shift(-1)
+            df['target'] = df['target'].fillna(0)
+            df['target'] = df['target'].clip(-0.1, 0.1)
+            
+            # NaN değerleri temizle
+            df = df.dropna()
+            
+            # Özellik sütunlarını kontrol et
+            missing_features = set(self.all_features) - set(df.columns)
+            if missing_features:
+                logger.warning(f"Eksik özellikler: {missing_features}")
+                for feature in missing_features:
+                    df[feature] = 0
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Veri işleme hatası: {str(e)}")
+            return None
+
+    def _check_data_quality(self, df, timeframe):
+        """Veri kalitesi kontrollerini gerçekleştir"""
+        try:
+            # Boşlukları tespit et
+            df = self.detect_price_gaps(df, timeframe)
+            
+            # Aykırı değerleri tespit et
+            df = self.detect_outliers(df)
+            
+            # Hacim spike'larını tespit et
+            df = self.detect_volume_spikes(df)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Veri kalitesi kontrolü hatası: {str(e)}")
+            raise
+
+    def _calculate_indicators(self, df):
+        """Teknik indikatörleri hesaplar"""
+        # Volatiliteye göre adaptif periyotları hesapla
+        volatility = df['close'].pct_change().std()
+        periods = self.calculate_adaptive_periods(volatility)
+        
+        # Momentum indikatörleri
+        df['rsi'] = ta.momentum.rsi(df['close'], window=periods['rsi'])
+        
+        # MACD hesaplama - güncellenmiş versiyon
+        macd_fast = ta.trend.ema_indicator(df['close'], window=periods['macd'][0])
+        macd_slow = ta.trend.ema_indicator(df['close'], window=periods['macd'][1])
+        df['macd'] = macd_fast - macd_slow
+        df['macd_signal'] = ta.trend.ema_indicator(df['macd'], window=periods['macd'][2])
+        df['macd_hist'] = df['macd'] - df['macd_signal']
+        
+        # Trend indikatörleri
+        for period in [10, 20, 50]:
+            df[f'sma_{period}'] = ta.trend.sma_indicator(df['close'], window=period)
+            df[f'ema_{period}'] = ta.trend.ema_indicator(df['close'], window=period)
+        
+        # Volatilite indikatörleri
+        df['atr'] = ta.volatility.average_true_range(
+            df['high'], df['low'], df['close'],
+            window=periods['atr']
+        )
+        
+        bollinger = ta.volatility.BollingerBands(
+            df['close'],
+            window=periods['bb'],
+            window_dev=2
+        )
+        df['bb_upper'] = bollinger.bollinger_hband()
+        df['bb_middle'] = bollinger.bollinger_mavg()
+        df['bb_lower'] = bollinger.bollinger_lband()
+        
+        # Osilatörler
+        stoch = ta.momentum.StochasticOscillator(
+            df['high'], df['low'], df['close'],
+            window=periods['stoch']
+        )
+        df['stoch_k'] = stoch.stoch()
+        df['stoch_d'] = stoch.stoch_signal()
+        
+        df['williams_r'] = ta.momentum.williams_r(
+            df['high'], df['low'], df['close'],
+            lbp=periods['stoch']
+        )
+        
+        # NaN değerleri doldur
+        df = df.fillna(method='ffill').fillna(method='bfill')
+        
+        return df
+
+    def _normalize_features(self, df):
+        """Özellikleri normalize eder"""
+        feature_groups = {
+            'price': self.price_features,
+            'volume': self.volume_features,
+            'momentum': self.momentum_indicators,
+            'trend': self.trend_indicators,
+            'volatility': self.volatility_indicators,
+            'oscillator': self.oscillator_indicators,
+            'quality': self.quality_features
+        }
+        
+        for group, features in feature_groups.items():
+            valid_features = [f for f in features if f in df.columns]
+            if not valid_features:
+                continue
+                
+            if not self.scalers_fitted[group]:
+                self.scalers[group].fit(df[valid_features])
+                self.scalers_fitted[group] = True
+            
+            df[valid_features] = self.scalers[group].transform(df[valid_features])
+        
+        return df
+
+    def detect_price_gaps(self, df, timeframe):
+        """Fiyat boşluklarını tespit et"""
+        try:
+            # Zaman farkını dakika cinsinden hesapla
+            df['time_diff'] = df.index.to_series().diff().dt.total_seconds() / 60
+            
+            # Timeframe'e göre beklenen zaman farkı
+            expected_diff = {
+                '5m': 5,
+                '15m': 15,
+                '1h': 60
+            }.get(timeframe, 5)
+            
+            # Boşlukları tespit et
+            df['has_gap'] = df['time_diff'] > expected_diff * 1.5
+            
+            # Boşluk büyüklüğünü hesapla (ATR'ye göre normalize edilmiş)
+            atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+            df['gap_size'] = np.where(df['has_gap'],
+                                     abs(df['open'] - df['close'].shift(1)) / atr,
+                                     0)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Fiyat boşluğu tespiti hatası: {str(e)}")
+            return df
+
+    def calculate_gap_size(self, df):
         """
-        Fiyat boşluklarını (gaps) tespit eder ve ilgili özellikleri ekler
+        Fiyat boşluklarının büyüklüğünü hesaplar
         
         Parametreler:
         - df: İşlenecek DataFrame
         
         Dönüş:
-        - Fiyat boşluğu özellikleri eklenmiş DataFrame
+        - Gap büyüklüğü serisi
         """
         try:
-            if df is None:
-                logger.warning("detect_price_gaps'a None değeri gönderildi")
-                dummy_df = pd.DataFrame()
-                dummy_df['gap'] = []
-                dummy_df['gap_size'] = []
-                return dummy_df
-            
-            if 'time' not in df.columns:
-                logger.debug("Zaman sütunu bulunamadı, fiyat boşlukları tespit edilemedi")
-                df['gap'] = 0
-                df['gap_size'] = 0
-                return df
-            
-            # Veriyi zaman sırasına göre sırala
-            df = df.sort_values('time').copy()
-            
-            # ATR kolonu yoksa hesapla
             if 'ATR' not in df.columns:
                 df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-                # NaN değerleri ffill/bfill ile doldur
                 df['ATR'] = df['ATR'].fillna(method='ffill').fillna(method='bfill')
             
-            # Sıfır veya NaN ATR değerlerini kontrol et
-            min_non_zero_atr = df[df['ATR'] > 0]['ATR'].min() if any(df['ATR'] > 0) else 0.0001
-            df['ATR'] = df['ATR'].replace([0, np.nan], min_non_zero_atr)
-            
-            # ATR <= 0 kontrolü (sonsuz değerleri önlemek için kritik)
-            if (df['ATR'] <= 0).any():
-                logger.warning(f"ATR sıfır veya negatif değerler içeriyor. Toplam: {(df['ATR'] <= 0).sum()} adet")
-                df['ATR'] = df['ATR'].replace([0, np.nan, -np.inf, np.inf], min_non_zero_atr)
-            
-            # Zaman farkını hesapla
-            df['time_diff'] = df['time'].diff().dt.total_seconds() / 60  # Dakika cinsinden
-            
-            # Normalde zaman farkı sıfırdan büyük olmalı. İlk satırda zaman farkı NaN olacak
-            df['time_diff'] = df['time_diff'].fillna(0)
-            
-            # Normal zaman farkı modunu bul (genelde 1, 5, 15, 30, 60, 240 dakika veya 1440 dakika)
-            mode_time_diff = df['time_diff'].value_counts().idxmax()
-            logger.debug(f"Normal zaman farkı: {mode_time_diff} dakika")
-            
             # Fiyat farkını ATR'ye göre normalize et
-            df['norm_price_diff'] = abs(df['open'] - df['close'].shift(1)) / df['ATR']
+            gap_size = abs(df['open'] - df['close'].shift(1)) / df['ATR']
             
             # Sonsuz ve NaN değerleri makul bir maksimum değere değiştir
-            max_allowed_gap = 10.0  # Makul bir maksimum değer
-            df['norm_price_diff'] = df['norm_price_diff'].replace([np.inf, -np.inf], max_allowed_gap)
-            df['norm_price_diff'] = df['norm_price_diff'].fillna(0)  # İlk satırda fiyat farkı NaN olacak
+            max_allowed_gap = 10.0
+            gap_size = gap_size.replace([np.inf, -np.inf], max_allowed_gap)
+            gap_size = gap_size.fillna(0)
             
-            # Gap olup olmadığını belirle
-            # Burada bir gap olması için iki kriter var:
-            # 1. Zaman farkı normal farktan büyük olmalı (mesela 4 saatlik timeframe'de 4 saatten fazla)
-            # 2. Normalize edilmiş fiyat farkı anlamlı olmalı (ATR'nin en az 0.5 katı)
-            # Bu kriterler değişebilir
+            # Gap olmayan yerlerde büyüklük 0 olmalı
+            gap_size = gap_size * df['has_gap']
             
-            # Gap kriteri: Zaman farkı normal zaman farkının 1.5 katından büyük VE normalize fiyat farkı 0.5'ten büyük
-            df['gap'] = ((df['time_diff'] > mode_time_diff * 1.5) & (df['norm_price_diff'] > 0.5)).astype(int)
-            
-            # Gap boyutunu hesapla, gap olmayan satırlar için 0
-            df['gap_size'] = df['gap'] * df['norm_price_diff']
-            
-            # Önemli gap'leri loglama
-            if df['gap'].sum() > 0:
-                significant_gaps = df[df['gap'] == 1]
-                max_gap_size = significant_gaps['gap_size'].max()
-                
-                # Tüm gap bilgilerini sadece debug seviyesinde logla
-                logger.debug(f"Veri setinde {len(significant_gaps)} adet piyasa boşluğu (gap) tespit edildi")
-                logger.debug(f"En büyük boşluk: {significant_gaps['time_diff'].max():.1f} dakika")
-                
-                # Detaylı gap bilgilerini sadece debug seviyesinde logla
-                for idx, row in significant_gaps.iterrows():
-                    gap_time = row['time']
-                    gap_size = row['gap_size']
-                    if gap_size > 2:  # Büyük gap: ATR'nin 2 katından fazla
-                        logger.debug(f"Büyük fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
-                    elif gap_size > 1:  # Anlamlı gap: ATR'nin 1-2 katı arası
-                        logger.debug(f"Anlamlı fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
-                    else:  # Küçük gap: ATR'nin 0.5-1 katı arası
-                        logger.debug(f"Küçük fiyat gap'i tespit edildi: {gap_time}, Büyüklük: {gap_size:.2f} ATR")
-            
-            # Geçici sütunu kaldır
-            if 'time_diff' in df.columns:
-                df = df.drop(columns=['time_diff'])
-            
-            # Son kontrol: NaN veya sonsuz değerlerin kontrolünü yap
-            if df['gap_size'].isnull().any() or np.isinf(df['gap_size']).any():
-                logger.warning("gap_size sütununda NaN veya sonsuz değerler var. Temizleniyor...")
-                df['gap_size'] = df['gap_size'].replace([np.inf, -np.inf], max_allowed_gap)
-                df['gap_size'] = df['gap_size'].fillna(0)
-            
-            # Gap size'ı maksimum değere kırp
-            if (df['gap_size'] > max_allowed_gap).any():
-                logger.warning(f"Bazı gap_size değerleri maksimum değer {max_allowed_gap}'dan büyük. Kırpılıyor...")
-                df['gap_size'] = df['gap_size'].clip(0, max_allowed_gap)
-            
-            return df
+            return gap_size
         
         except Exception as e:
-            logger.error(f"Fiyat boşlukları tespit edilirken hata: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            
-            # Hata durumunda varsayılan değerlerle devam et
-            # Bu kısımda df None olabilir, kontrol et
-            if df is not None:
-                df['gap'] = 0
-                df['gap_size'] = 0
-                return df
-            else:
-                # DataFrame none ise boş bir dataframe oluştur
-                dummy_df = pd.DataFrame()
-                dummy_df['gap'] = []
-                dummy_df['gap_size'] = []
-                return dummy_df
-    
+            self.logger.error(f"Gap büyüklüğü hesaplanırken hata: {str(e)}")
+            return pd.Series(0, index=df.index)
+
     def add_session_info(self, df):
         """
         Mum verilerine seans bilgilerini ekler (Asya, Avrupa, ABD)
@@ -244,7 +493,7 @@ class DataProcessor:
         """
         try:
             if 'time' not in df.columns:
-                logger.debug("Zaman sütunu bulunamadı, seans bilgileri eklenemedi")
+                self.logger.debug("Zaman sütunu bulunamadı, seans bilgileri eklenemedi")
                 df['session_asian'] = 0
                 df['session_london'] = 0
                 df['session_ny'] = 0
@@ -268,7 +517,7 @@ class DataProcessor:
             df['session_ny'] = df.apply(lambda x: 1 if US_SESSION[0] <= time(x['hour'], x['minute']) <= US_SESSION[1] else 0, axis=1)
             
             # Seans dağılımını logla (sadece debug seviyesinde)
-            logger.debug(f"Seans dağılımı: Asya: {df['session_asian'].mean()*100:.1f}%, "
+            self.logger.debug(f"Seans dağılımı: Asya: {df['session_asian'].mean()*100:.1f}%, "
                        f"Avrupa: {df['session_london'].mean()*100:.1f}%, "
                        f"ABD: {df['session_ny'].mean()*100:.1f}%")
             
@@ -278,9 +527,9 @@ class DataProcessor:
             return df
             
         except Exception as e:
-            logger.error(f"Seans bilgileri eklenirken hata: {str(e)}")
+            self.logger.error(f"Seans bilgileri eklenirken hata: {str(e)}")
             import traceback
-            logger.error(traceback.format_exc())
+            self.logger.error(traceback.format_exc())
             
             # Hata durumunda varsayılan değerlerle devam et
             df['session_asian'] = 0
@@ -288,136 +537,35 @@ class DataProcessor:
             df['session_ny'] = 0
             return df
     
-    def add_technical_indicators(self, df):
+    def add_technical_indicators(self, df, timeframe):
         """
-        Mum verilerine teknik göstergeleri ekler
+        Teknik göstergeleri hesaplar ve DataFrame'e ekler
         
-        Parametreler:
-        - df: İşlenecek DataFrame
+        Args:
+            df: İşlenecek DataFrame
+            timeframe: Veri zaman aralığı ('5m', '15m', '1h', etc.)
         
-        Dönüş:
-        - Teknik göstergeler eklenmiş DataFrame
+        Returns:
+            DataFrame: Teknik göstergeler eklenmiş DataFrame
         """
         try:
+            # Önce hedef değişkeni hesapla (ham veriden)
+            df['target'] = df['close'].pct_change(periods=1).shift(-1)
+            df['target'] = df['target'].fillna(0)  # Son satırlar için NaN değerleri 0 ile doldur
+            df['target'] = df['target'].clip(-0.1, 0.1)  # ±%10 ile sınırla
+            
+            # Teknik göstergeleri ekle
+            df = self._calculate_indicators(df)
             if df is None:
-                logger.warning("add_technical_indicators'a None değeri gönderildi")
                 return None
             
-            # Gerekli sütunların varlığını kontrol et
-            required_columns = ['open', 'high', 'low', 'close', 'tick_volume']
-            missing_columns = [col for col in required_columns if col not in df.columns]
+            # NaN değerleri temizle
+            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
             
-            if missing_columns:
-                logger.warning(f"Eksik sütunlar tespit edildi: {missing_columns}. Otomatik olarak ekleniyor.")
-                df = df.copy()
-                
-                # Eksik sütunları ekle
-                for col in missing_columns:
-                    if col == 'tick_volume':
-                        # tick_volume yoksa, varsayılan değer olarak 1 ata
-                        df['tick_volume'] = 1
-                    elif col in ['open', 'high', 'low'] and 'close' in df.columns:
-                        # Eğer close varsa, diğer fiyat sütunları için close değerini kullan
-                        df[col] = df['close']
-                    elif col == 'close' and 'open' in df.columns:
-                        # Eğer open varsa, close için open değerini kullan
-                        df[col] = df['open']
-                    else:
-                        # Diğer durumlar için varsayılan değer
-                        logger.error(f"Kritik sütun {col} için varsayılan değer atanamıyor")
-                        return None
-            else:
-                df = df.copy()
-            
-            # Minimum veri kontrolü
-            if len(df) < 30:  # En az 30 mum gerekli
-                logger.error("Teknik göstergeler için yeterli veri yok")
+            # Tüm özelliklerin var olduğunu kontrol et
+            df = self.all_features_exist(df)
+            if df is None:
                 return None
-            
-            # Piyasa boşluklarını (gap) kontrol et
-            if 'time' in df.columns:
-                df = df.sort_values('time')
-                # Zaman farkını hesapla
-                df['time_diff'] = df['time'].diff().dt.total_seconds() / 60  # Dakika cinsinden
-                
-                # Standart zaman aralığını bul (en yaygın zaman farkı)
-                if len(df) > 1:
-                    # En yaygın zaman farkını bul (mod)
-                    time_diff_mode = df['time_diff'].value_counts().idxmax()
-                    
-                    # Büyük boşlukları tespit et (standart aralığın 3 katından fazla)
-                    gaps = df[df['time_diff'] > time_diff_mode * 3]
-                    
-                    if not gaps.empty:
-                        logger.debug(f"Veri setinde {len(gaps)} adet piyasa boşluğu (gap) tespit edildi")
-                        logger.debug(f"En büyük boşluk: {gaps['time_diff'].max()} dakika")
-                
-                # Geçici sütunu kaldır
-                if 'time_diff' in df.columns:
-                    df = df.drop('time_diff', axis=1)
-            
-            # Verilerdeki NaN veya sonsuz değerleri tespit et ve düzelt
-            # Temiz veri elde ettiğimizden emin olalım
-            for col in ['open', 'high', 'low', 'close']:
-                if col in df.columns:
-                    # Sonsuz değerleri son geçerli değer ile değiştir
-                    df[col] = df[col].replace([np.inf, -np.inf], np.nan)
-                    
-                    # NaN değerleri interpolasyon ile doldur
-                    df[col] = df[col].interpolate(method='linear').ffill().bfill()
-            
-            # RSI hesaplama
-            df['RSI'] = ta.momentum.rsi(df['close'], window=14)
-            
-            # MACD hesaplama
-            macd = ta.trend.macd(df['close'])
-            df['MACD'] = macd
-            df['Signal_Line'] = ta.trend.macd_signal(df['close'])
-            
-            # ATR hesaplama
-            df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-            
-            # ATR değerinin sıfır olduğu durumları kontrol et
-            min_non_zero_atr = df[df['ATR'] > 0]['ATR'].min() if any(df['ATR'] > 0) else 0.0001
-            df['ATR'] = df['ATR'].replace([0, np.nan, np.inf, -np.inf], min_non_zero_atr)
-            
-            # Bollinger Bands
-            df['MA20'] = ta.trend.sma_indicator(df['close'], window=20)
-            bollinger = ta.volatility.BollingerBands(df['close'])
-            df['Upper_Band'] = bollinger.bollinger_hband()
-            df['Lower_Band'] = bollinger.bollinger_lband()
-            
-            # İlk hesaplama sonrasında göstergelerdeki NaN değerleri temizle
-            # RSI için özel işlem - ilk değerler 50 (nötr) olsun
-            if 'RSI' in df.columns and df['RSI'].isnull().any():
-                # Önce backward fill (sonraki değerlerden ilk değerleri doldur)
-                df['RSI'] = df['RSI'].fillna(method='bfill')
-                # Kalan NaN'ları 50 ile doldur
-                df['RSI'] = df['RSI'].fillna(50)
-            
-            # MACD ve Signal Line için özel işlem
-            for col in ['MACD', 'Signal_Line']:
-                if col in df.columns and df[col].isnull().any():
-                    # Backward fill ile NaN'ları temizlemeye çalış
-                    df[col] = df[col].fillna(method='bfill')
-                    # Kalan NaN'ları 0 ile doldur (nötr değer)
-                    df[col] = df[col].fillna(0)
-            
-            # Bollinger Bands için özel işlem
-            for col in ['Upper_Band', 'Lower_Band', 'MA20']:
-                if col in df.columns and df[col].isnull().any():
-                    # Önce backward fill ile doldur
-                    df[col] = df[col].fillna(method='bfill')
-                    # Kalan NaN'lar için kapanış fiyatına dayalı değerler kullan
-                    if col == 'Upper_Band':
-                        df[col] = df[col].fillna(df['close'] * 1.02)  # Üst bant kapanışın %2 üstü
-                    elif col == 'Lower_Band':
-                        df[col] = df[col].fillna(df['close'] * 0.98)  # Alt bant kapanışın %2 altı
-                    elif col == 'MA20':
-                        df[col] = df[col].fillna(df['close'])  # MA basitçe kapanış fiyatı olsun
-            
-            # Fiyat boşluklarını (gaps) tespit et ve ekle
-            df = self.detect_price_gaps(df)
             
             # Seans bilgilerini ekle
             df = self.add_session_info(df)
@@ -429,480 +577,14 @@ class DataProcessor:
                 logger.warning(f"Teknik göstergelerde NaN değerler var: {nan_cols}")
                 logger.warning(f"NaN değer sayıları: {nan_counts}")
                 
-                # NaN değerleri temizle - önce forward fill, sonra backward fill, yine de NaN kalırsa makul değerlerle doldur
-                # Her sütunu ayrı ayrı temizle
+                # NaN değerleri temizle - önce forward fill, sonra backward fill
                 for col in nan_cols:
-                    # Önce ileriye doğru doldur
-                    df[col] = df[col].fillna(method='ffill')
-                    # Sonra geriye doğru doldur
-                    df[col] = df[col].fillna(method='bfill')
-                
-                # Yine de NaN değerler varsa, makul varsayılanlarla doldur
-                default_values = {
-                    'RSI': 50,        # Nötr
-                    'MACD': 0,        # Nötr
-                    'Signal_Line': 0, # Nötr
-                    'Upper_Band': df['close'].mean() * 1.02 if 'close' in df.columns else 1,  # Ortalama +%2
-                    'Lower_Band': df['close'].mean() * 0.98 if 'close' in df.columns else 1,  # Ortalama -%2
-                    'MA20': df['close'].mean() if 'close' in df.columns else 1,  # Ortalama
-                    'gap_size': 0,    # Gap yok
-                    'ATR': min_non_zero_atr,  # Minimum ATR
-                    'norm_price_diff': 0  # Nötr
-                }
-                
-                for col in nan_cols:
-                    if col in default_values:
-                        df[col] = df[col].fillna(default_values[col])
-                    else:
-                        # Diğer sütunlar için varsayılan 0
-                        df[col] = df[col].fillna(0)
-                
-                # Son bir kontrol - hala NaN var mı?
-                remaining_nans = df[self.all_features].isnull().sum().sum()
-                if remaining_nans > 0:
-                    logger.warning(f"Tüm temizleme işlemlerine rağmen {remaining_nans} NaN değer kaldı")
-                    # Kalan tüm NaN değerleri 0 ile doldur
-                    for col in self.all_features:
-                        if col in df.columns and df[col].isnull().any():
-                            df[col] = df[col].fillna(0)
-            
-            # Sonsuz değerleri kontrol et
-            try:
-                # Önce tüm gerekli sütunların olduğundan emin ol
-                df = self.all_features_exist(df)
-                
-                if df is None:
-                    logger.error("Veriler kontrol edilirken beklenmeyen bir hata oluştu, None değeri döndürüldü")
-                    return None
-                
-                # all_features listesinde olup df'te olmayan sütunları sıfır ile doldur
-                for col in self.all_features:
-                    if col not in df.columns:
-                        df[col] = 0
-                        logger.warning(f"Eksik sütun {col} sıfır ile dolduruldu")
-                
-                # İnfinite değerleri kontrol et
-                if (df[self.all_features].replace([np.inf, -np.inf], np.nan).isnull().any().any()):
-                    logger.warning("Teknik göstergelerde sonsuz değerler tespit edildi, temizleniyor")
-                    # Sonsuz değerleri, sıfır olmayan en küçük değerle değiştir
-                    for col in self.all_features:
-                        if col in df.columns:
-                            # Makul bir maksimum değer belirle (her sütun için değişebilir)
-                            max_val = 10.0 if col in ['gap_size', 'norm_price_diff'] else 100.0
-                            
-                            # Sonsuz değerleri makul değerlerle değiştir
-                            df[col] = df[col].replace([np.inf, -np.inf], max_val)
-                            
-                            # Değerleri makul bir aralığa sınırla
-                            df[col] = df[col].clip(lower=-max_val, upper=max_val)
-            except Exception as e:
-                logger.warning(f"Sonsuz değerler kontrol edilirken hata: {str(e)}")
-                # İşleme devam etmek için hata yönetimi
-                import traceback
-                logger.debug(traceback.format_exc())
+                    df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
             
             return df
             
         except Exception as e:
             logger.error(f"Teknik göstergeler hesaplanırken hata: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
-        
-    def _add_technical_indicators_optimized(self, df):
-        """Optimized version of indicator calculation for large datasets"""
-        try:
-            # Use numpy operations where possible for better performance with large DataFrames
-            close_prices = df['close'].values
-            
-            # RSI - vectorized calculation
-            try:
-                delta = np.diff(close_prices, prepend=close_prices[0])
-                gain = np.where(delta > 0, delta, 0)
-                loss = np.where(delta < 0, -delta, 0)
-                
-                # Using rolling calculation with minimum period of 1
-                avg_gain = pd.Series(gain).rolling(window=14, min_periods=1).mean().values
-                avg_loss = pd.Series(loss).rolling(window=14, min_periods=1).mean().values
-                
-                # Avoid division by zero
-                avg_loss = np.where(avg_loss < 0.001, 0.001, avg_loss)
-                rs = np.divide(avg_gain, avg_loss)
-                
-                # Calculate RSI
-                rsi = 100 - (100 / (1 + rs))
-                
-                # Ensure values are in valid range
-                rsi = np.clip(rsi, 0, 100)
-                
-                # Replace NaN values
-                rsi = np.nan_to_num(rsi, nan=50.0)
-                
-                df['RSI'] = rsi
-            except Exception as e:
-                logger.error(f"Error in RSI calculation (optimized): {str(e)}")
-                # Default RSI value
-                df['RSI'] = 50
-            
-            # MACD
-            exp1 = pd.Series(close_prices).ewm(span=12, adjust=False, min_periods=5).mean().values
-            exp2 = pd.Series(close_prices).ewm(span=26, adjust=False, min_periods=5).mean().values
-            df['MACD'] = exp1 - exp2
-            df['Signal_Line'] = pd.Series(df['MACD'].values).ewm(span=9, adjust=False, min_periods=5).mean().values
-            
-            # Moving Averages - vectorized
-            df['MA20'] = pd.Series(close_prices).rolling(window=20, min_periods=5).mean().values
-            
-            # Bollinger Bands
-            std20 = pd.Series(close_prices).rolling(window=20, min_periods=5).std().values
-            df['20dSTD'] = std20
-            df['Upper_Band'] = df['MA20'] + (std20 * 2)
-            df['Lower_Band'] = df['MA20'] - (std20 * 2)
-            
-            # ATR calculation
-            high_prices = df['high'].values
-            low_prices = df['low'].values
-            
-            # Calculate True Range components
-            high_low = high_prices - low_prices
-            
-            # Shift close prices
-            close_shifted = np.roll(close_prices, 1)
-            close_shifted[0] = close_prices[0]  # Handle first element
-            
-            high_close = np.abs(high_prices - close_shifted)
-            low_close = np.abs(low_prices - close_shifted)
-            
-            # Get true range - element-wise maximum
-            true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-            
-            # Calculate ATR
-            df['ATR'] = pd.Series(true_range).rolling(window=14, min_periods=5).mean().values
-            
-            # Fill any NaN values
-            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error in optimized indicator calculation: {str(e)}")
-            # Fall back to standard method
-            return self.add_technical_indicators(df)
-        
-    def prepare_data(self, df, sequence_length=60):
-        """Prepares data for LSTM model"""
-        try:
-            # Önce sütunların var olup olmadığını kontrol et
-            required_columns = self.feature_columns.copy()
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            
-            if missing_columns:
-                print(f"Adding missing columns to DataFrame: {missing_columns}")
-                for col in missing_columns:
-                    if col == 'tick_volume':
-                        # tick_volume eksikse, varsayılan değerlerle doldur
-                        df[col] = 1
-            
-            # Add technical indicators
-            df = self.add_technical_indicators(df)
-            
-            # Check if enough data
-            if len(df) < sequence_length + 20:  # At least 20 bars needed for technical indicators
-                print("Warning: Not enough data for technical indicators")
-                return torch.FloatTensor([]), torch.FloatTensor([])
-            
-            # Fill NaN values
-            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
-            # Ensure all required columns exist
-            for col in self.feature_columns:
-                if col not in df.columns:
-                    print(f"Error: Required column '{col}' is missing even after preprocessing")
-                    return torch.FloatTensor([]), torch.FloatTensor([])
-            
-            # Normalize price data
-            price_data = df[self.feature_columns].values
-            scaled_prices = self.price_scaler.fit_transform(price_data)
-            
-            # Prepare numpy arrays
-            sequences = []
-            targets = []
-            
-            for i in range(len(scaled_prices) - sequence_length):
-                sequence = scaled_prices[i:(i + sequence_length)]
-                target = scaled_prices[i + sequence_length][3]  # close price
-                sequences.append(sequence)
-                targets.append(target)
-            
-            # Create numpy arrays directly instead of lists
-            sequences = np.array(sequences)
-            targets = np.array(targets)
-            
-            return torch.FloatTensor(sequences), torch.FloatTensor(targets)
-            
-        except Exception as e:
-            print(f"Error in prepare_data: {str(e)}")
-            return torch.FloatTensor([]), torch.FloatTensor([])
-    
-    def prepare_data_with_weights(self, df, sequence_length=60, train_split=0.8, target_column='close', prediction_steps=1, weight_recent_factor=2.0):
-        """
-        LSTM modeli için ağırlıklı eğitim verisi hazırlar
-        Yeni verilere daha yüksek ağırlık verilir
-        
-        Parametreler:
-        - df: İşlenecek DataFrame
-        - sequence_length: Her bir örnek için kullanılacak geçmiş veri miktarı
-        - train_split: Eğitim/doğrulama bölme oranı (0.8 = %80 eğitim, %20 doğrulama)
-        - target_column: Tahmin edilecek hedef sütun
-        - prediction_steps: Kaç adım ilerisini tahmin edeceğiz
-        - weight_recent_factor: Yeni verilere verilecek ağırlık çarpanı
-        
-        Dönüş:
-        - X_train, y_train, X_val, y_val, sample_weights
-        """
-        try:
-            # Gerekli sütunların varlığını kontrol et
-            required_columns = self.all_features
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            
-            if missing_columns:
-                logger.error(f"Gerekli sütunlar eksik: {missing_columns}")
-                return None, None, None, None, None
-            
-            # Teknik göstergeleri ekle (eğer yoksa)
-            if 'RSI' not in df.columns:
-                df = self.add_technical_indicators(df)
-                if df is None:
-                    return None, None, None, None, None
-            
-            # NaN değerleri doldur
-            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
-            # Minimum veri kontrolü
-            if len(df) < sequence_length + prediction_steps:
-                logger.error(f"Yeterli veri yok. En az {sequence_length + prediction_steps} satır gerekli, {len(df)} satır mevcut")
-                return None, None, None, None, None
-            
-            # Fiyat verilerini normalize et
-            price_data = df[['open', 'high', 'low', 'close']].values
-            self.price_scaler.fit(price_data)
-            normalized_prices = self.price_scaler.transform(price_data)
-            
-            # Normalize edilmiş fiyatları DataFrame'e geri koy
-            df[['open', 'high', 'low', 'close']] = normalized_prices
-            
-            # Diğer özellikleri normalize et (tick_volume ve teknik göstergeler)
-            feature_data = df[self.all_features].values
-            self.feature_scaler.fit(feature_data)
-            normalized_features = self.feature_scaler.transform(feature_data)
-            
-            # Normalize edilmiş özellikleri DataFrame'e geri koy
-            df[self.all_features] = normalized_features
-            
-            # Dizileri hazırla
-            X, y = [], []
-            
-            # Her bir zaman adımı için bir dizi oluştur
-            for i in range(len(df) - sequence_length - prediction_steps + 1):
-                # Geçmiş veri
-                X.append(df[self.all_features].values[i:i+sequence_length])
-                # Gelecek fiyat (hedef)
-                y.append(df[target_column].values[i+sequence_length+prediction_steps-1])
-            
-            # NumPy dizilerine dönüştür
-            X = np.array(X)
-            y = np.array(y)
-            
-            # Eğitim ve doğrulama setlerine böl
-            train_size = int(len(X) * train_split)
-            X_train, X_val = X[:train_size], X[train_size:]
-            y_train, y_val = y[:train_size], y[train_size:]
-            
-            # Ağırlıkları hesapla (yeni verilere daha yüksek ağırlık ver)
-            sample_weights = np.ones(len(X_train))
-            
-            # Son %20'lik kısma daha yüksek ağırlık ver
-            recent_data_start = int(len(X_train) * 0.8)
-            
-            # Doğrusal artan ağırlıklar (1'den weight_recent_factor'a)
-            weights_recent = np.linspace(1, weight_recent_factor, len(X_train) - recent_data_start)
-            sample_weights[recent_data_start:] = weights_recent
-            
-            # Gap ve seans bazlı ağırlıklandırma
-            # Gap olan örneklere daha yüksek ağırlık ver
-            for i in range(len(X_train)):
-                # Son dizideki gap bilgisini kontrol et
-                gap_present = X_train[i, -1, self.all_features.index('gap')]
-                gap_size = X_train[i, -1, self.all_features.index('gap_size')]
-                
-                # Gap varsa ağırlığı artır (gap büyüklüğüne göre)
-                if gap_present > 0:
-                    # Gap büyüklüğüne göre ağırlık artışı (1.5 ile 3 arasında)
-                    gap_weight_factor = 1.5 + min(gap_size, 3) / 2
-                    sample_weights[i] *= gap_weight_factor
-                
-                # Seans bazlı ağırlıklandırma
-                session_asian = X_train[i, -1, self.all_features.index('session_asian')]
-                session_london = X_train[i, -1, self.all_features.index('session_london')]
-                session_ny = X_train[i, -1, self.all_features.index('session_ny')]
-                
-                # Farklı seanslara farklı ağırlıklar ver (örnek: Avrupa seansı daha önemli olabilir)
-                if session_asian > 0:
-                    sample_weights[i] *= 1.2  # Asya seansı
-                if session_london > 0:
-                    sample_weights[i] *= 1.5  # Avrupa seansı (en önemli)
-                if session_ny > 0:
-                    sample_weights[i] *= 1.3  # ABD seansı
-            
-            # Ağırlıkları normalize et (ortalama 1 olacak şekilde)
-            sample_weights = sample_weights * len(sample_weights) / np.sum(sample_weights)
-            
-            # PyTorch tensor'larına dönüştür
-            X_train = torch.FloatTensor(X_train)
-            y_train = torch.FloatTensor(y_train).unsqueeze(1)
-            X_val = torch.FloatTensor(X_val)
-            y_val = torch.FloatTensor(y_val).unsqueeze(1)
-            sample_weights = torch.FloatTensor(sample_weights)
-            
-            logger.info(f"Veri hazırlama tamamlandı: {X_train.shape[0]} eğitim örneği, {X_val.shape[0]} doğrulama örneği")
-            logger.info(f"Ağırlık aralığı: {sample_weights.min().item():.2f} - {sample_weights.max().item():.2f}")
-            
-            return X_train, y_train, X_val, y_val, sample_weights
-            
-        except Exception as e:
-            logger.error(f"Veri hazırlanırken hata: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None, None, None, None, None
-
-    def prepare_prediction_data(self, df):
-        """
-        Tahmin için veri hazırlar
-        Fiyat boşluğu ve seans bilgilerini de içerir
-        
-        Parametreler:
-        - df: İşlenecek DataFrame
-        
-        Dönüş:
-        - PyTorch tensor formatında hazırlanmış veri
-        """
-        try:
-            # Veri kontrolü
-            if df is None or len(df) == 0:
-                logger.error("Veri yok")
-                return None
-            
-            # Teknik göstergeleri ekle
-            df = self.add_technical_indicators(df)
-            if df is None:
-                return None
-            
-            # Tüm özelliklerin var olduğunu kontrol et
-            if not all(feature in df.columns for feature in self.all_features):
-                missing_features = [f for f in self.all_features if f not in df.columns]
-                logger.error(f"Bazı özellikler eksik: {missing_features}")
-                return None
-            
-            # Son veriyi al ve kontrolden geçir
-            latest_data = df.iloc[-1:][self.all_features].copy()
-            
-            # Sonsuz veya çok büyük değerleri kontrol et ve düzelt
-            for col in self.all_features:
-                if col in latest_data.columns:
-                    # Sonsuz değerleri makul değerlerle değiştir
-                    max_val = 10.0 if col in ['gap_size'] else 100.0
-                    
-                    # Sonsuz değerleri temizle
-                    latest_data[col] = latest_data[col].replace([np.inf, -np.inf], np.nan)
-                    
-                    # NaN değerleri temizle
-                    if latest_data[col].isnull().any():
-                        # Eğer df'de daha fazla veri varsa, son geçerli değeri kullan
-                        if len(df) > 1:
-                            last_valid = df[col].dropna().iloc[-1] if not df[col].dropna().empty else 0
-                            latest_data[col] = latest_data[col].fillna(last_valid)
-                        else:
-                            # Varsayılan değerler ata
-                            if col == 'RSI':
-                                latest_data[col] = latest_data[col].fillna(50)
-                            elif col in ['open', 'high', 'low', 'close']:
-                                # Fiyat sütunları için mevcut değerlerden doldur
-                                if not df['close'].isnull().all():
-                                    latest_data[col] = latest_data[col].fillna(df['close'].dropna().iloc[-1])
-                                else:
-                                    latest_data[col] = latest_data[col].fillna(0)
-                            else:
-                                latest_data[col] = latest_data[col].fillna(0)
-            
-            # Değerleri makul bir aralıkta sınırla
-            for col in self.all_features:
-                if col in latest_data.columns:
-                    if col == 'RSI':
-                        latest_data[col] = latest_data[col].clip(0, 100)
-                    elif col == 'gap_size':
-                        latest_data[col] = latest_data[col].clip(0, 10)
-                    elif col in ['session_asian', 'session_london', 'session_ny', 'gap']:
-                        latest_data[col] = latest_data[col].clip(0, 1)
-            
-            # Feature scaler'ı güncelle ve veriyi ölçeklendir
-            if not self.feature_scaler_fitted:
-                try:
-                    # Önce sonsuz değerleri ve NaN'ları temizle
-                    clean_df = df[self.all_features].replace([np.inf, -np.inf], np.nan)
-                    
-                    # NaN değerleri doldur
-                    clean_df = clean_df.fillna(method='ffill').fillna(method='bfill').fillna(0)
-                    
-                    # Feature scaler'ı eğit
-                    self.feature_scaler.fit(clean_df)
-                    self.feature_scaler_fitted = True
-                except Exception as e:
-                    logger.error(f"Feature scaler eğitilirken hata: {str(e)}")
-                    # Basit MinMaxScaler yerine manuel normalizasyon yap
-                    for col in self.all_features:
-                        if col in latest_data.columns:
-                            if col not in ['session_asian', 'session_london', 'session_ny', 'gap']:
-                                max_val = df[col].max() if not df[col].isnull().all() else 1
-                                min_val = df[col].min() if not df[col].isnull().all() else 0
-                                if max_val > min_val:
-                                    latest_data[col] = (latest_data[col] - min_val) / (max_val - min_val)
-                                else:
-                                    latest_data[col] = 0
-            
-            try:
-                # Son kontrol - hala NaN veya sonsuz değer var mı?
-                if latest_data.isnull().any().any() or np.isinf(latest_data.values).any():
-                    logger.warning("Hala NaN veya sonsuz değerler var, temizleniyor")
-                    latest_data = latest_data.replace([np.inf, -np.inf], 0).fillna(0)
-                
-                # Ölçeklendirme
-                scaled_data = self.feature_scaler.transform(latest_data)
-                
-                # PyTorch tensor'a çevir
-                tensor_data = torch.FloatTensor(scaled_data).unsqueeze(0)
-                
-                # Gap ve seans bilgilerini logla
-                gap_present = df.iloc[-1]['gap'] if 'gap' in df.columns else 0
-                gap_size = df.iloc[-1]['gap_size'] if 'gap_size' in df.columns else 0
-                
-                if gap_present > 0:
-                    logger.debug(f"Tahmin verisi hazırlanırken fiyat boşluğu (gap) tespit edildi. Büyüklük: {gap_size:.2f} ATR")
-                
-                # Hangi seansta olduğumuzu logla
-                if 'session_asian' in df.columns and df.iloc[-1]['session_asian'] > 0:
-                    logger.info("Şu anda Asya seansındayız")
-                elif 'session_london' in df.columns and df.iloc[-1]['session_london'] > 0:
-                    logger.info("Şu anda Avrupa seansındayız")
-                elif 'session_ny' in df.columns and df.iloc[-1]['session_ny'] > 0:
-                    logger.info("Şu anda ABD seansındayız")
-                
-                return tensor_data
-            except Exception as e:
-                logger.error(f"Veri ölçeklendirilirken hata: {str(e)}")
-                return None
-            
-        except Exception as e:
-            logger.error(f"Tahmin verisi hazırlanırken hata: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return None
@@ -927,19 +609,18 @@ class DataProcessor:
             logger.warning(f"DataFrame'de eksik sütunlar bulundu: {missing_cols}")
             
             default_values = {
-                'RSI': 50,           # Nötr
-                'MACD': 0,           # Nötr
-                'Signal_Line': 0,    # Nötr
-                'ATR': 0.0001,       # Küçük bir değer
-                'Upper_Band': df['close'].mean() * 1.02 if 'close' in df.columns else 1,  # Ortalama +%2
-                'Lower_Band': df['close'].mean() * 0.98 if 'close' in df.columns else 1,  # Ortalama -%2
-                'MA20': df['close'].mean() if 'close' in df.columns else 1,  # Ortalama
-                'gap': 0,            # Gap yok
-                'gap_size': 0,       # Gap boyutu
-                'norm_price_diff': 0, # Normalize fiyat farkı
-                'session_asian': 0,   # Seans bilgileri
-                'session_london': 0, # Seans bilgileri
-                'session_ny': 0      # Seans bilgileri
+                'rsi': 50,           # Nötr
+                'macd': 0,           # Nötr
+                'macd_signal': 0,    # Nötr
+                'atr': 0.0001,       # Küçük bir değer
+                'bb_upper': df['close'].mean() * 1.02 if 'close' in df.columns else 1,  # Ortalama +%2
+                'bb_lower': df['close'].mean() * 0.98 if 'close' in df.columns else 1,  # Ortalama -%2
+                'sma_20': df['close'].mean() if 'close' in df.columns else 1,  # Ortalama
+                'has_gap': 0,        # Gap yok
+                'gap_size': 0,        # Gap boyutu
+                'asian_session': 0,   # Seans bilgileri
+                'london_session': 0,  # Seans bilgileri
+                'ny_session': 0        # Seans bilgileri
             }
             
             for col in missing_cols:
@@ -950,118 +631,6 @@ class DataProcessor:
                 logger.debug(f"Eksik sütun eklendi: {col}")
         
         return df
-
-    def prepare_rl_state(self, df, account_info=None):
-        """
-        Pekiştirmeli öğrenme için durum verisi hazırlar
-        
-        Parametreler:
-        - df: Pandas DataFrame, işlenecek veri
-        - account_info: Hesap durumu bilgileri (opsiyonel)
-        
-        Dönüş:
-        - Normalize edilmiş durum vektörü
-        """
-        try:
-            # DataFrame kontrolü
-            if isinstance(df, pd.Series):
-                df = pd.DataFrame([df])
-            elif not isinstance(df, pd.DataFrame):
-                logger.error("Geçersiz veri tipi. DataFrame veya Series olmalı")
-                return None
-            
-            # Teknik göstergeleri ekle
-            df = self.add_technical_indicators(df)
-            if df is None:
-                logger.error("Teknik göstergeler eklenirken hata oluştu")
-                return None
-            
-            # En son veriyi al
-            current_data = df.iloc[-1]
-            
-            # tick_volume'u volume olarak yeniden adlandır
-            if 'tick_volume' in current_data.index and 'volume' not in current_data.index:
-                current_data['volume'] = current_data['tick_volume']
-            
-            # Gerekli özellikleri kontrol et
-            required_features = [
-                'open', 'high', 'low', 'close', 'volume',  # Fiyat verileri
-                'RSI', 'MACD', 'Signal_Line', 'ATR',  # Teknik göstergeler
-                'Upper_Band', 'Lower_Band', 'MA20'  # Bollinger bantları
-            ]
-            
-            # Eksik özellikleri kontrol et
-            missing_features = [feat for feat in required_features if feat not in current_data.index]
-            if missing_features:
-                logger.error(f"Eksik özellikler: {missing_features}")
-                return None
-            
-            # 1. Fiyat verileri (5 özellik)
-            price_data = np.array([
-                float(current_data['open']),
-                float(current_data['high']),
-                float(current_data['low']),
-                float(current_data['close']),
-                float(current_data['volume'])
-            ])
-            
-            # 2. Teknik göstergeler (7 özellik)
-            technical_indicators = np.array([
-                float(current_data['RSI']),
-                float(current_data['MACD']),
-                float(current_data['Signal_Line']),
-                float(current_data['ATR']),
-                float(current_data['Upper_Band']),
-                float(current_data['Lower_Band']),
-                float(current_data['MA20'])
-            ])
-            
-            # 3. Hesap durumu (3 özellik)
-            if account_info is None:
-                account_state = np.array([0.0, 0.0, 0.0])  # Varsayılan değerler
-            else:
-                account_state = np.array([
-                    account_info.get('balance', 0.0) / account_info.get('initial_balance', 1.0),
-                    account_info.get('position', 0.0),
-                    account_info.get('last_trade_price', 0.0) / float(current_data['close']) if account_info.get('last_trade_price', 0.0) > 0 else 0.0
-                ])
-            
-            # Güvenli normalizasyon fonksiyonu
-            def safe_normalize(data):
-                if len(data) == 0:
-                    return data
-                data_mean = np.mean(data)
-                if abs(data_mean) < 1e-8:  # Sıfıra çok yakın
-                    return data - np.mean(data)  # Sadece merkezle
-                return (data - data_mean) / (np.std(data) + 1e-8)  # Standart sapma ile normalize et
-            
-            # Verileri normalize et
-            normalized_price = safe_normalize(price_data)
-            normalized_tech = safe_normalize(technical_indicators)
-            
-            # Tüm özellikleri birleştir
-            state_array = np.concatenate([
-                normalized_price,     # 5 özellik
-                normalized_tech,      # 7 özellik
-                account_state        # 3 özellik
-            ]).astype(np.float32)
-            
-            # NaN ve sonsuz değerleri kontrol et
-            if np.any(np.isnan(state_array)) or np.any(np.isinf(state_array)):
-                logger.warning("State vektöründe NaN veya sonsuz değerler var. Temizleniyor...")
-                state_array = np.nan_to_num(state_array, nan=0.0, posinf=1.0, neginf=-1.0)
-            
-            # State vektörünü -1 ile 1 arasına normalize et
-            state_array = np.clip(state_array, -1, 1)
-            
-            logger.debug(f"RL state vektörü oluşturuldu. Boyut: {state_array.shape}")
-            return state_array
-            
-        except Exception as e:
-            logger.error(f"RL state hazırlanırken hata: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
 
     def get_feature_names(self):
         """Özellik isimlerini döndürür"""
@@ -1092,14 +661,14 @@ class DataProcessor:
                 
                 # Teknik göstergeleri ekle
                 logger.info(f"{timeframe} için teknik göstergeler ekleniyor...")
-                df_with_indicators = self.add_technical_indicators(df.copy())
+                df_with_indicators = self.add_technical_indicators(df.copy(), timeframe)
                 if df_with_indicators is None:
                     logger.error(f"{timeframe} için teknik göstergeler eklenemedi")
                     continue
                 
                 # Fiyat boşluklarını tespit et
                 logger.info(f"{timeframe} için fiyat boşlukları tespit ediliyor...")
-                df_with_gaps = self.detect_price_gaps(df_with_indicators)
+                df_with_gaps = self.detect_price_gaps(df_with_indicators, timeframe)
                 if df_with_gaps is None:
                     logger.error(f"{timeframe} için fiyat boşlukları tespit edilemedi")
                     continue
@@ -1156,7 +725,8 @@ class DataProcessor:
             if not self.mt5_connector.connected:
                 logger.error("MT5 bağlantısı yok. Bağlantı yeniden deneniyor...")
                 if not self.mt5_connector.connect():
-                    raise Exception("MT5 bağlantısı kurulamadı!")
+                    logger.error("MT5 bağlantısı kurulamadı!")
+                    return None
 
             # Tüm timeframe'ler için veriyi bir kerede al
             all_data = {}
@@ -1176,8 +746,14 @@ class DataProcessor:
                         )
                         
                         if data is not None and len(data) >= periods * 0.5:  # En az %50 veri gerekli
-                            all_data[tf] = data
-                            logger.info(f"{tf} için {len(data)} satır veri alındı")
+                            # Veri işleme
+                            processed_data = self.process_data(data.copy(), tf)
+                            if processed_data is None:
+                                logger.error(f"{tf} için veri işleme başarısız")
+                                continue
+                                
+                            all_data[tf] = processed_data
+                            logger.info(f"{tf} için {len(processed_data)} satır veri işlendi")
                             break
                         else:
                             logger.warning(f"Deneme {attempt + 1}: {tf} için yeterli veri alınamadı")
@@ -1191,13 +767,22 @@ class DataProcessor:
                 if tf not in all_data:
                     logger.error(f"{tf} için veri alınamadı")
                     if timeframe:  # Belirli bir timeframe isteniyorsa ve alınamadıysa hata ver
-                        raise Exception(f"{tf} için veri alınamadı")
+                        return None
                     
             if not all_data:
-                raise Exception("Hiçbir zaman dilimi için veri alınamadı")
+                logger.error("Hiçbir zaman dilimi için veri alınamadı")
+                return None
             
-            # Verileri işle
-            return self.process_training_data(all_data)
+            # Verileri birleştir
+            if timeframe:
+                return all_data[timeframe]
+            else:
+                # Tüm timeframe'leri birleştir
+                combined_data = pd.concat(all_data.values(), axis=0)
+                if len(combined_data) == 0:
+                    logger.error("Birleştirilmiş veri boş")
+                    return None
+                return combined_data
             
         except Exception as e:
             logger.error(f"Eğitim verisi hazırlanırken hata: {str(e)}")
@@ -1205,88 +790,97 @@ class DataProcessor:
             logger.error(traceback.format_exc())
             return None
 
-    def prepare_sequences(self, df, sequence_length=60, target_column='close', prediction_steps=1):
-        """
-        LSTM modeli için sekans verilerini hazırlar
-        
-        Parametreler:
-        - df: İşlenecek DataFrame
-        - sequence_length: Her bir örnek için kullanılacak geçmiş veri miktarı
-        - target_column: Tahmin edilecek hedef sütun
-        - prediction_steps: Kaç adım ilerisini tahmin edeceğiz
-        
-        Dönüş:
-        - sequences: Eğitim sekansları
-        - targets: Hedef değerler
-        """
+    def prepare_sequences(self, df, sequence_length=60, target_column='close', prediction_steps=1, timeframe='5m'):
+        """LSTM modeli için sekans verilerini hazırlar"""
         try:
             if df is None or len(df) < sequence_length + prediction_steps:
                 logger.error(f"Yetersiz veri: {len(df) if df is not None else 0} satır < {sequence_length + prediction_steps}")
                 return None, None
+
+            # DataFrame'i kopyala
+            df = df.copy()
             
-            # Teknik göstergeleri ekle
-            df = self.add_technical_indicators(df)
-            if df is None:
-                return None, None
+            # Özellik sütunlarını kontrol et ve sırala
+            missing_features = set(self.all_features) - set(df.columns)
+            if missing_features:
+                logger.warning(f"Eksik özellikler: {missing_features}")
+                for feature in missing_features:
+                    df[feature] = 0
+            
+            # Özellik sütunlarını sırala
+            feature_columns = sorted(self.all_features)
+            
+            # Hedef değişkeni kontrol et
+            if 'target' not in df.columns:
+                df['target'] = df[target_column].pct_change(periods=prediction_steps).shift(-prediction_steps)
+                df['target'] = df['target'].fillna(0)
+                df['target'] = df['target'].clip(-0.1, 0.1)
             
             # NaN değerleri temizle
             df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
             
-            # Tüm özelliklerin var olduğunu kontrol et
-            df = self.all_features_exist(df)
-            if df is None:
+            # Özellik verilerini numpy array'e dönüştür
+            try:
+                feature_data = df[feature_columns].astype(np.float32).values
+                target_data = df['target'].astype(np.float32).values
+            except Exception as e:
+                logger.error(f"Veri tipi dönüşüm hatası: {str(e)}")
                 return None, None
             
-            # Önce hedef değişkeni normalize et (yüzdesel değişim olarak)
-            target_values = df[target_column].values
-            target_changes = np.diff(target_values) / target_values[:-1]  # Yüzdesel değişim
-            target_changes = np.clip(target_changes, -0.1, 0.1)  # ±%10 ile sınırla
-            
             # Verileri normalize et
-            feature_data = df[self.all_features].values
             if not self.feature_scaler_fitted:
-                # Her özellik için ayrı normalizasyon
-                normalized_data = np.zeros_like(feature_data)
-                for i in range(feature_data.shape[1]):
-                    feat = feature_data[:, i]
-                    mean = feat.mean()
-                    std = feat.std()
-                    if std < 1e-8:
-                        normalized_data[:, i] = feat - mean
-                    else:
-                        normalized_data[:, i] = (feat - mean) / std
-                self.feature_scaler_fitted = True
-            else:
+                try:
+                    self.feature_scaler.fit(feature_data)
+                    self.feature_scaler_fitted = True
+                except Exception as e:
+                    logger.error(f"Scaler fit hatası: {str(e)}")
+                    return None, None
+            
+            try:
                 normalized_data = self.feature_scaler.transform(feature_data)
+                normalized_data = np.nan_to_num(normalized_data, nan=0.0, posinf=1.0, neginf=-1.0)
+            except Exception as e:
+                logger.error(f"Normalizasyon hatası: {str(e)}")
+                return None, None
             
             # Sekansları ve hedefleri hazırla
             sequences = []
             targets = []
             
             for i in range(len(normalized_data) - sequence_length - prediction_steps + 1):
-                # Geçmiş veri
                 seq = normalized_data[i:(i + sequence_length)]
-                # Gelecek değer (hedef) - yüzdesel değişim
-                target = target_changes[i + sequence_length - 1]
+                target = target_data[i + sequence_length - 1]
                 
-                sequences.append(seq)
-                targets.append(target)
+                if not (np.isnan(seq).any() or np.isnan(target)):
+                    sequences.append(seq)
+                    targets.append(target)
+            
+            if not sequences:
+                logger.error("Geçerli sekans oluşturulamadı")
+                return None, None
             
             # NumPy dizilerine dönüştür
-            sequences = np.array(sequences)
-            targets = np.array(targets)
+            sequences = np.asarray(sequences, dtype=np.float32)
+            targets = np.asarray(targets, dtype=np.float32)
+            
+            # NaN ve sonsuz değerleri kontrol et
+            sequences = np.nan_to_num(sequences, nan=0.0, posinf=1.0, neginf=-1.0)
+            targets = np.nan_to_num(targets, nan=0.0, posinf=1.0, neginf=-1.0)
             
             # PyTorch tensor'larına dönüştür
-            sequences = torch.FloatTensor(sequences)
-            targets = torch.FloatTensor(targets).reshape(-1, 1)
+            sequences = torch.from_numpy(np.ascontiguousarray(sequences)).float()
+            targets = torch.from_numpy(np.ascontiguousarray(targets)).float().reshape(-1, 1)
             
-            logger.info(f"Veri hazırlama tamamlandı: {len(sequences)} örnek")
-            logger.debug(f"Hedef değişken aralığı: {targets.min().item():.4f} - {targets.max().item():.4f}")
+            # Tensor boyutlarını ve değer aralıklarını logla
+            logger.info(f"Sequences tensor shape: {sequences.shape}")
+            logger.info(f"Targets tensor shape: {targets.shape}")
+            logger.info(f"Sequences value range: [{sequences.min().item():.4f}, {sequences.max().item():.4f}]")
+            logger.info(f"Targets value range: [{targets.min().item():.4f}, {targets.max().item():.4f}]")
             
             return sequences, targets
             
         except Exception as e:
-            logger.error(f"Sekans hazırlanırken hata: {str(e)}")
+            logger.error(f"Veri hazırlama sırasında hata: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return None, None

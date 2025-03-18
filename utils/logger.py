@@ -39,8 +39,8 @@ def setup_logger():
     Configures and returns the main logger.
     Uses LOGGING_CONFIG from config/config.py.
     """
-    # Delete existing log files
-    delete_existing_logs()
+    # Log dosyalarının otomatik silinmesi kaldırıldı
+    # delete_existing_logs()
     
     # Create logs directory
     if not os.path.exists('logs'):
@@ -145,4 +145,57 @@ def print_trade_info(message: str) -> None:
     """Print trade related information with special formatting."""
     formatted_message = f"{Colors.BOLD}{Colors.GREEN}📊 {message.ljust(60)}{Colors.ENDC}"
     print(formatted_message)
-    logger.info(message) 
+    logger.info(message)
+
+def setup_epoch_logger():
+    """
+    Model eğitimi sırasında her epoch'un sonuçlarını loglamak için özel bir logger oluşturur.
+    """
+    # Create logs directory
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    
+    # Epoch logger oluştur
+    epoch_logger = logging.getLogger('TradingBot.EpochTracker')
+    epoch_logger.setLevel(logging.INFO)
+    
+    # Epoch log dosyası
+    epoch_log_path = os.path.join('logs', f'training_epochs.log')
+    epoch_file_handler = RotatingFileHandler(
+        epoch_log_path, 
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    
+    # Log formatı
+    epoch_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    epoch_file_handler.setFormatter(epoch_formatter)
+    
+    # Önceki handler'ları temizle
+    if epoch_logger.handlers:
+        epoch_logger.handlers.clear()
+    
+    epoch_logger.addHandler(epoch_file_handler)
+    
+    return epoch_logger
+
+# Epoch logger'ı oluştur
+epoch_logger = setup_epoch_logger()
+
+def log_epoch_results(epoch, epochs, train_loss, train_acc, val_loss=None, val_acc=None, lr=None):
+    """
+    Her epoch sonunda sonuçları loglama fonksiyonu
+    """
+    # Temel epoch bilgileri
+    log_message = f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Train Acc: {train_acc:.2%}"
+    
+    # Validation bilgileri varsa ekle
+    if val_loss is not None and val_acc is not None:
+        log_message += f", Val Loss: {val_loss:.6f}, Val Acc: {val_acc:.2%}"
+    
+    # Learning rate bilgisi varsa ekle
+    if lr is not None:
+        log_message += f", LR: {lr:.2e}"
+    
+    # Epoch logger'a kaydet
+    epoch_logger.info(log_message) 

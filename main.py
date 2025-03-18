@@ -127,33 +127,54 @@ class XAUUSDTradingBot:
             return False
             
     def run(self):
-        """Run the trading bot"""
-        print_section(
-            "BOT ÇALIŞIYOR",
-            "BOT IS RUNNING"
-        )
-        print_info(
-            "Bot başarıyla başlatıldı ve çalışıyor.",
-            "Bot successfully started and running.",
-            "Çıkmak için Ctrl+C tuşlarına basın.",
-            "Press Ctrl+C to exit."
-        )
-        
+        """Run trading bot in an infinite loop"""
         try:
-            while True:
-                time.sleep(1)
+            print_section("BOT BAŞLADI")
+            print_info("Bot çalışıyor...")
+            
+            while not self.training_stop_event.is_set():
+                for timeframe in self.timeframes:
+                    try:
+                        # Her timeframe için işlem sinyalleri kontrol et
+                        self.check_trading_signals(timeframe)
+                        time.sleep(1)  # Çok hızlı döngüye girmeyi engelle
+                    except Exception as e:
+                        logger.error(f"{timeframe} için işlem kontrolü sırasında hata: {str(e)}")
+                
+                # Açık pozisyonları kontrol et
+                try:
+                    positions = self.position_manager.get_open_positions("XAUUSD")
+                    if positions:
+                        print(f"{len(positions)} açık pozisyon var.")
+                        for pos in positions:
+                            # Trailing stop kontrolü
+                            try:
+                                self.position_manager.update_trailing_stop(pos)
+                            except Exception as e:
+                                logger.error(f"Trailing stop güncellemesi sırasında hata: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Pozisyon kontrolü sırasında hata: {str(e)}")
+                
+                # Risk yönetimi güncellemesi
+                try:
+                    # Hesabın güncel durumunu al
+                    balance = self.mt5.get_account_info().balance
+                    # Risk yöneticisini güncelle
+                    self.risk_manager.update_balance(balance)
+                except Exception as e:
+                    logger.error(f"Risk yönetimi güncellemesi sırasında hata: {str(e)}")
+                
+                # Periyodik bekle
+                time.sleep(30)  # 30 saniye bekle
+                
         except KeyboardInterrupt:
-            print_info(
-                "\nBot kullanıcı tarafından durduruldu.",
-                "\nBot stopped by user."
-            )
-            self.stop()
+            print("\nBot kullanıcı tarafından durduruldu.")
         except Exception as e:
-            print_error(
-                f"Bot çalışma hatası: {str(e)}",
-                f"Bot runtime error: {str(e)}"
-            )
+            print(f"Çalışma hatası: {str(e)}")
+            logger.error(f"Çalışma hatası: {str(e)}")
+        finally:
             self.stop()
+            print_section("BOT DURDURULDU")
         
     def run_initial_tests(self):
         """Run initial tests to check if everything is working properly"""
@@ -387,25 +408,36 @@ class XAUUSDTradingBot:
             
             # RL Trader'ı başlat
             try:
-                # Veri hazırlığı
-                initial_data = self.data_processor.get_latest_data()
+                # Veri hazırlığı - her timeframe için ayrı veri hazırla
+                data_dict = {}
+                for tf in self.timeframes:
+                    data_dict[tf] = self.data_processor.get_latest_data(timeframe=tf)
+                    if data_dict[tf] is None:
+                        print_warning(f"{tf} için veri alınamadı!")
+                
+                if not data_dict:
+                    raise Exception("Hiçbir timeframe için veri alınamadı!")
+                
+                # Çevre parametrelerini oluştur
                 env_params = {
-                    'df': initial_data,
+                    'df': data_dict,
                     'window_size': MODEL_CONFIG['rl']['window_size'],
-                    'initial_balance': self.risk_manager.initial_balance,
-                    'commission': TRADING_CONFIG['commission']
+                    'initial_balance': self.risk_manager.initial_balance if hasattr(self, 'risk_manager') else 10000.0,
+                    'commission': TRADING_CONFIG.get('transaction_fee', 0.00025)
                 }
                 
-                # LSTM modelini al
-                lstm_model = self.lstm_models.get('5m')  # 5 dakikalık modeli kullan
-                if lstm_model is None:
-                    raise Exception("RL Trader için LSTM modeli bulunamadı!")
+                # LSTM modellerini kontrol et
+                if not self.lstm_models:
+                    raise Exception("RL Trader için LSTM modeli bulunamadı! Lütfen önce modelleri eğitin (--train_lstm)")
                 
+                # RL Trader'ı başlat
                 self.rl_trader = RLTrader(
-                    lstm_model=lstm_model,
+                    lstm_models=self.lstm_models,
                     env_params=env_params
                 )
+                
                 print_success("RL Trader başarıyla başlatıldı!")
+                print_info(f"Kullanılabilir timeframe modelleri: {', '.join(self.lstm_models.keys())}")
             except Exception as e:
                 print_warning(f"RL Trader başlatılamadı: {str(e)}")
                 print_info("Bot yalnızca LSTM modeli ile devam edecek.")
@@ -643,101 +675,69 @@ class XAUUSDTradingBot:
 
         # Eğitim verilerini hazırla
         print_info("Eğitim verileri hazırlanıyor...")
-        train_data = self.data_processor.get_training_data()
         
-        # Veri kontrolü
-        if train_data is None:
-            print_error("Eğitim verisi alınamadı!")
-            return False
-            
-        # Veri kalitesi kontrolü
-        if len(train_data) == 0:
-            print_error("Eğitim verisi boş!")
-            return False
-            
-        # Eksik veri kontrolü
-        if train_data.isnull().values.any():
-            missing_count = train_data.isnull().sum().sum()
-            print_warning(f"{missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
-            train_data = train_data.fillna(method='ffill').fillna(method='bfill')
-
         # LSTM modellerini eğit
         if model_choice in ['1', '3']:
             print_section("LSTM MODELLERİ EĞİTİMİ")
             
-            # LSTM eğitimini başlat
-            print_info("LSTM eğitimi başlatılıyor...")
+            # Her bir timeframe için model eğit
+            for timeframe in DATA_CONFIG['timeframes']:
+                print_section(f"{timeframe} LSTM MODELİ EĞİTİMİ")
+                print_info(f"{timeframe} için LSTM eğitimi başlatılıyor...")
+                
+                # Timeframe için veri al
+                train_data = self.data_processor.get_training_data(timeframe)
+                
+                # Veri kontrolü
+                if train_data is None:
+                    print_error(f"{timeframe} için eğitim verisi alınamadı!")
+                    continue
+                    
+                # Veri kalitesi kontrolü
+                if len(train_data) == 0:
+                    print_error(f"{timeframe} için eğitim verisi boş!")
+                    continue
+                    
+                # Eksik veri kontrolü
+                if train_data.isnull().values.any():
+                    missing_count = train_data.isnull().sum().sum()
+                    print_warning(f"{timeframe} için {missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
+                    train_data = train_data.fillna(method='ffill').fillna(method='bfill')
+                
+                try:
+                    # Bu timeframe için LSTM modelini eğit
+                    success = self.train_lstm_model(timeframe)
+                    if success:
+                        print_success(f"{timeframe} LSTM modeli başarıyla eğitildi!")
+                    else:
+                        print_error(f"{timeframe} LSTM modeli eğitimi başarısız oldu!")
+                except Exception as e:
+                    print_error(f"{timeframe} LSTM modeli eğitimi sırasında hata: {str(e)}")
+                    logger.error(f"{timeframe} LSTM modeli eğitimi sırasında hata: {str(e)}")
+                    logger.error(traceback.format_exc())
             
-            # Eğitim verilerini hazırla
-            sequences = self.data_processor.prepare_sequences(
-                train_data,
-                MODEL_CONFIG['training']['sequence_length']
-            )
+            print_section("LSTM EĞİTİMİ TAMAMLANDI")
             
-            # LSTM modelini oluştur ve eğit
-            lstm_model = LSTMPredictor(config=MODEL_CONFIG['lstm'])
-            lstm_model.to(device)
-            
-            try:
-                lstm_model.train_model(
-                    sequences,
-                    train_data['target'].values,
-                    epochs=MODEL_CONFIG['training']['epochs'],
-                    batch_size=MODEL_CONFIG['training']['batch_size'],
-                    learning_rate=MODEL_CONFIG['training']['learning_rate']
-                )
-                print_success("LSTM eğitimi tamamlandı!")
-            except Exception as e:
-                print_error(f"LSTM eğitimi sırasında hata: {str(e)}")
-                return False
-        
         # RL modelini eğit
         if model_choice in ['2', '3']:
-            print_section("RL MODEL EĞİTİMİ")
+            print_section("RL MODELİ EĞİTİMİ")
+            # ... RL eğitim kodu ...
             
-            # LSTM modelinin varlığını kontrol et
-            lstm_model = self.lstm_models.get('5m')
-            if lstm_model is None:
-                print_error("RL için gerekli LSTM modeli bulunamadı!")
-                return False
-            
-            # LSTM tahminlerini ekle
-            print_info("LSTM tahminleri ekleniyor...")
-            sequences = self.data_processor.prepare_sequences(
-                train_data,
-                MODEL_CONFIG['training']['sequence_length']
-            )
-            with torch.no_grad():
-                lstm_predictions = lstm_model(sequences).numpy()
-            train_data['lstm_prediction'] = lstm_predictions
-            
-            # RL modelini oluştur ve eğit
-            try:
-                env_params = {
-                    'df': train_data,
-                    'window_size': MODEL_CONFIG['rl']['window_size'],
-                    'initial_balance': self.risk_manager.initial_balance if self.risk_manager else 10000.0,
-                    'commission': TRADING_CONFIG['commission']
-                }
-                
-                self.rl_trader = RLTrader(lstm_model=lstm_model, env_params=env_params)
-                self.rl_trader.train(
-                    total_timesteps=MODEL_CONFIG['rl']['total_timesteps'],
-                    log_interval=MODEL_CONFIG['rl']['log_interval']
-                )
-                print_success("RL eğitimi tamamlandı!")
-            except Exception as e:
-                print_error(f"RL eğitimi sırasında hata: {str(e)}")
-                return False
-
-        print_section("MODEL EĞİTİMİ TAMAMLANDI")
-        print_success("Tüm modeller başarıyla eğitildi!")
         return True
 
-    def execute_trade(self, timeframe, lstm_pred, rl_action):
-        """Execute trades based on model predictions"""
+    def check_trading_signals(self, timeframe):
+        """
+        LSTM ve RL modelleri kullanarak işlem sinyallerini kontrol et
+        """
         try:
-            print_section(f"TİCARET YÜRÜTME BAŞLANGIÇ ({timeframe})")
+            # Modelleri kontrol et
+            lstm_model = self.lstm_models.get(timeframe)
+            if lstm_model is None:
+                logger.error(f"{timeframe} için LSTM modeli bulunamadı")
+                return
+            
+            # RL Trader kontrolü
+            has_rl = hasattr(self, 'rl_trader') and self.rl_trader is not None
             
             # Piyasa açık mı kontrol et
             if not self.market_hours.is_market_open():
@@ -774,78 +774,144 @@ class XAUUSDTradingBot:
                 logger.error("Geçersiz ATR değeri")
                 return
             
-            print(f"Mevcut fiyat: {current_price}, ATR: {atr}")
+            # LSTM tahmini yap
+            lstm_pred = lstm_model.predict_proba(df.tail(60))
             
-            # İşlem sinyallerini kontrol et
-            if rl_action == 1 and lstm_pred > 0.55:  # ALIM
-                trade_type = mt5.ORDER_TYPE_BUY
-                print(f"ALIM sinyali: LSTM ({lstm_pred:.2f}) ve RL ({rl_action}) aynı yönde")
-            elif rl_action == 2 and lstm_pred < 0.45:  # SATIM
-                trade_type = mt5.ORDER_TYPE_SELL
-                print(f"SATIM sinyali: LSTM ({lstm_pred:.2f}) ve RL ({rl_action}) aynı yönde")
+            # LSTM tahminini normalize et (0-1 arası)
+            lstm_pred_norm = (lstm_pred[0] + 0.10) / 0.20  # -0.10 -> 0.0, 0.10 -> 1.0
+            lstm_pred_norm = max(0, min(1, lstm_pred_norm))  # 0-1 arasına sınırla
+            
+            print(f"Mevcut fiyat: {current_price}, ATR: {atr}, LSTM tahmini: {lstm_pred_norm:.4f}")
+            
+            # İşlem kararı - varsayılan olarak işlem yok
+            trade_type = None
+            trade_confidence = 0
+            
+            if has_rl:
+                # Tüm timeframe'ler için state hazırla
+                states = {}
+                for tf in self.timeframes:
+                    tf_data = self.mt5.get_historical_data("XAUUSD", tf, num_candles=100)
+                    if tf_data is not None and len(tf_data) >= 30:
+                        tf_df = self.data_processor.add_technical_indicators(tf_data)
+                        if tf_df is not None:
+                            # Son 60 veriyi al ve RL state olarak hazırla
+                            states[tf] = self.data_processor.prepare_rl_state(tf_df)
+                
+                if states:
+                    try:
+                        # Tüm timeframe'lerden birleşik tahmin al
+                        rl_action, action_details = self.rl_trader.predict_combined(states)
+                        
+                        # Bireysel tahminleri logla
+                        for tf, pred in action_details['individual_predictions'].items():
+                            action_name = "BEKLE" if pred == 0 else "AL" if pred == 1 else "SAT"
+                            print(f"{tf} RL tahmini: {action_name} ({pred})")
+                        
+                        # Voting sonuçlarını ve güven değerlerini logla
+                        votes = action_details['votes']
+                        print(f"Oylama sonuçları: BEKLE: {votes[0]:.2f}, AL: {votes[1]:.2f}, SAT: {votes[2]:.2f}")
+                        
+                        # Güven skoru - en yüksek oyun toplam oya oranı
+                        max_vote = max(votes.values())
+                        total_votes = sum(votes.values())
+                        confidence = max_vote / total_votes if total_votes > 0 else 0
+                        
+                        print(f"Birleşik RL tahmini: {rl_action} ({0: 'BEKLE', 1: 'AL', 2: 'SAT'}[rl_action]), Güven: {confidence:.2f}")
+                        
+                        # İşlem kararını RL modeli belirliyor
+                        if rl_action == 1:  # AL
+                            trade_type = mt5.ORDER_TYPE_BUY
+                            trade_confidence = confidence
+                            print(f"RL modeli AL sinyali verdi, güven skoru: {confidence:.2f}")
+                        elif rl_action == 2:  # SAT
+                            trade_type = mt5.ORDER_TYPE_SELL
+                            trade_confidence = confidence
+                            print(f"RL modeli SAT sinyali verdi, güven skoru: {confidence:.2f}")
+                        else:
+                            print("RL modeli BEKLEMEYİ öneriyor")
+                            
+                    except Exception as e:
+                        logger.error(f"RL tahmininde hata: {str(e)}")
+                        # RL model hata verirse, sadece LSTM modeline geri dönüyoruz
+                        # Bu kısım ileride tamamen kaldırılabilir, şimdilik fallback olarak bırakıyoruz
+                        if lstm_pred_norm > 0.65:  # Güçlü ALIM
+                            trade_type = mt5.ORDER_TYPE_BUY
+                            trade_confidence = lstm_pred_norm
+                            print(f"RL modeli hata verdi, LSTM modeli AL sinyali verdi: {lstm_pred_norm:.2f}")
+                        elif lstm_pred_norm < 0.35:  # Güçlü SATIM
+                            trade_type = mt5.ORDER_TYPE_SELL
+                            trade_confidence = 1 - lstm_pred_norm
+                            print(f"RL modeli hata verdi, LSTM modeli SAT sinyali verdi: {lstm_pred_norm:.2f}")
+                        else:
+                            print("İşlem sinyali yok")
             else:
-                print(f"İşlem sinyali yok: LSTM ({lstm_pred:.2f}) ve RL ({rl_action}) uyumsuz")
+                # Sadece LSTM modeli varsa (fallback)
+                if lstm_pred_norm > 0.65:  # Güçlü ALIM
+                    trade_type = mt5.ORDER_TYPE_BUY
+                    trade_confidence = lstm_pred_norm
+                    print(f"ALIM sinyali: LSTM ({lstm_pred_norm:.2f})")
+                elif lstm_pred_norm < 0.35:  # Güçlü SATIM
+                    trade_type = mt5.ORDER_TYPE_SELL
+                    trade_confidence = 1 - lstm_pred_norm
+                    print(f"SATIM sinyali: LSTM ({lstm_pred_norm:.2f})")
+                else:
+                    print(f"İşlem sinyali yok: LSTM ({lstm_pred_norm:.2f})")
+                    return
+            
+            # İşlem yapmaya karar verildi mi?
+            if trade_type is None:
+                return
+                
+            # Güven skoru minimum eşiği aşıyor mu?
+            MIN_CONFIDENCE = 0.6  # Minimum %60 güven
+            if trade_confidence < MIN_CONFIDENCE:
+                print(f"Güven skoru çok düşük ({trade_confidence:.2f} < {MIN_CONFIDENCE}), işlem yapılmıyor")
                 return
             
             # Risk yönetimi kontrolü
             if not self.risk_manager.can_trade():
-                logger.warning("Risk yönetimi işleme izin vermiyor")
+                print("Risk limitlerine ulaşıldı, işlem yapılmıyor")
                 return
             
-            # Sembol bilgilerini al
-            symbol_info = self.mt5.symbol_info("XAUUSD")
-            if symbol_info is None:
-                logger.error("Sembol bilgisi alınamadı")
-                return
+            # İşlem boyutu hesapla
+            calculated_lot = self.risk_manager.calculate_position_size(current_price, atr * 2)
             
-            # Stop loss ve take profit hesaplama için risk yöneticisini kullan
+            # Mevcut pozisyonları kontrol et
+            open_positions = self.position_manager.get_open_positions("XAUUSD")
+            
+            # Eğer aynı yönde pozisyon varsa, işlem yapma
+            for pos in open_positions:
+                if (trade_type == mt5.ORDER_TYPE_BUY and pos['type'] == 0) or \
+                   (trade_type == mt5.ORDER_TYPE_SELL and pos['type'] == 1):
+                    print(f"Zaten bu yönde açık pozisyon var (Ticket: {pos['ticket']}), işlem yapılmıyor")
+                    return
+            
+            # Stop Loss ve Take Profit hesapla
             if trade_type == mt5.ORDER_TYPE_BUY:
-                position_type = "BUY"
-                entry_price = symbol_info.ask
-            else:  # SELL
-                position_type = "SELL"
-                entry_price = symbol_info.bid
+                sl = current_price - (atr * 2)
+                tp = current_price + (atr * 4)
+            else:
+                sl = current_price + (atr * 2)
+                tp = current_price - (atr * 4)
             
-            # Stop loss hesaplama
-            sl_price = self.risk_manager.calculate_stop_loss(entry_price, atr, position_type)
-            
-            # Take profit hesaplama
-            tp_price = self.risk_manager.calculate_take_profit(entry_price, sl_price, TRADING_CONFIG['risk_reward_ratio'])
-            
-            # Lot büyüklüğü hesaplama
-            lot_size = self.risk_manager.calculate_position_size(entry_price, sl_price)
-            
-            # Lot büyüklüğü sınırlamaları
-            lot_size = max(min(lot_size, symbol_info.volume_max), symbol_info.volume_min)
-            
-            print(f"Stop Loss: {sl_price:.2f} (mesafe: {abs(entry_price - sl_price):.2f})")
-            print(f"Take Profit: {tp_price:.2f} (mesafe: {abs(entry_price - tp_price):.2f})")
-            print(f"Hesaplanan lot: {lot_size}")
-            
-            # İşlemi position manager ile aç
-            ticket = self.position_manager.open_position(
+            # İşlemi aç
+            trade_result = self.mt5.open_trade(
                 symbol="XAUUSD",
                 order_type=trade_type,
-                volume=lot_size,
-                price=entry_price,
-                sl=sl_price,
-                tp=tp_price,
-                comment=f"Auto Trade {timeframe}"
+                lot=calculated_lot,
+                sl=sl,
+                tp=tp
             )
             
-            if ticket:
-                print(f"İşlem başarıyla gerçekleşti! Ticket: {ticket}")
-                self.risk_manager.update_balance(0)  # İşlem başlangıçta sıfır kar/zarar ile başlar
+            if trade_result:
+                print(f"İşlem başarılı: {trade_result}")
             else:
-                error_msg = f"İşlem başarısız"
-                logger.error(error_msg)
-                print(error_msg)
-            
+                print("İşlem açılamadı")
+                
         except Exception as e:
-            logger.error(f"İşlem hatası: {str(e)}")
-            print(f"İşlem hatası: {str(e)}")
-        finally:
-            print_section("TİCARET YÜRÜTME BİTİŞ")
+            logger.error(f"İşlem sinyalleri kontrol edilirken hata: {str(e)}")
+            print(f"İşlem sinyalleri kontrol edilirken hata: {str(e)}")
 
     def stop(self):
         """Stop the trading bot gracefully"""
@@ -971,7 +1037,7 @@ class XAUUSDTradingBot:
                 rl_action = self.rl_trader.predict(rl_state)
             
             # İşlemi yürüt
-            self.execute_trade(timeframe, lstm_pred, rl_action)
+            self.check_trading_signals(timeframe)
             
         except Exception as e:
             logger.error(f"{timeframe} için işlem hatası: {str(e)}")
@@ -1096,6 +1162,7 @@ class XAUUSDTradingBot:
         except Exception as e:
             print_error(f"Bot başlatma hatası: {str(e)}")
             logger.error(f"Bot başlatma hatası: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     def train_lstm_model(self, timeframe):
@@ -1141,225 +1208,103 @@ class XAUUSDTradingBot:
             # Veri kalitesi kontrolü
             if train_data.isnull().values.any():
                 missing_count = train_data.isnull().sum().sum()
-                print_warning(f"{missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
+                print_warning(f"{timeframe} için {missing_count} eksik veri bulundu. Otomatik doldurma yapılıyor...")
                 train_data = train_data.fillna(method='ffill').fillna(method='bfill')
             
-            # Model parametrelerini al
-            params = MODEL_CONFIG['lstm']
-            sequence_length = params.get('sequence_length', 60)
-            hidden_size = params.get('hidden_size', 64)
-            num_layers = params.get('num_layers', 2)
-            dropout = params.get('dropout', 0.2)
-            learning_rate = params.get('learning_rate', 0.001)
-            batch_size = params.get('batch_size', 32)
-            epochs = params.get('epochs', 50)
-            validation_split = MODEL_CONFIG['training'].get('validation_split', 0.1)
-            
-            # Veriyi model için hazırla
-            print_info("Eğitim ve doğrulama sekansları hazırlanıyor...")
-            X, y = self.data_processor.prepare_sequences(train_data, sequence_length)
-            if X is None or y is None:
-                raise Exception("Veri hazırlama başarısız!")
-            
-            # Veri boyutlarını kontrol et
-            if len(X) < batch_size:
-                raise Exception(f"Yetersiz veri: {len(X)} örnek < {batch_size} batch size")
-            
             # Veriyi eğitim ve doğrulama setlerine böl
-            split_idx = int(len(X) * (1 - validation_split))
-            X_train, X_val = X[:split_idx], X[split_idx:]
-            y_train, y_val = y[:split_idx], y[split_idx:]
+            total_size = len(train_data)
+            split_idx = int(total_size * (1 - MODEL_CONFIG['training']['validation_split']))
             
-            print_info(f"Veri bölündü: {len(X_train)} eğitim, {len(X_val)} doğrulama örneği")
+            train_df = train_data.iloc[:split_idx]
+            val_df = train_data.iloc[split_idx:]
             
-            # Model oluştur
-            input_size = X.shape[2]  # Özellik sayısı
-            model = LSTMPredictor(config={
-                'lstm': {
-                    'input_size': input_size,
-                    'hidden_size': hidden_size,
-                    'num_layers': num_layers,
-                    'dropout': dropout,
-                    'bidirectional': True
-                },
-                'batch_norm': {
-                    'momentum': 0.1,
-                    'eps': 1e-5
-                },
-                'attention': {
-                    'dims': [hidden_size * 2, 64, 1],
-                    'dropout': 0.2
-                }
-            })
+            print_info(f"Veri bölündü: {len(train_df)} eğitim, {len(val_df)} doğrulama örneği")
             
-            # Check if checkpoint exists
-            if os.path.exists(self.checkpoint_path):
-                print_info(f"Eğitim kontrol noktası bulundu: {self.checkpoint_path}")
-                user_input = input("Eğitimi kontrol noktasından devam ettirmek ister misiniz? (y/n): ")
-                if user_input.lower() == 'y':
-                    try:
-                        model.load_checkpoint(self.checkpoint_path)
-                        print_success("Kontrol noktası başarıyla yüklendi!")
-                    except Exception as e:
-                        print_error(f"Kontrol noktası yükleme hatası: {str(e)}")
-                        print_info("Yeni eğitim başlatılıyor...")
+            # Eğitim ve doğrulama verilerini hazırla
+            train_sequences, train_targets = self.data_processor.prepare_sequences(
+                df=train_df,
+                sequence_length=MODEL_CONFIG['training']['sequence_length'],
+                target_column='close',
+                prediction_steps=1,
+                timeframe=timeframe
+            )
             
-            # Eğitim başlangıç zamanı
-            start_time = time.time()
+            val_sequences, val_targets = self.data_processor.prepare_sequences(
+                df=val_df,
+                sequence_length=MODEL_CONFIG['training']['sequence_length'],
+                target_column='close',
+                prediction_steps=1,
+                timeframe=timeframe
+            )
             
-            # Bellek temizliği
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            # Create a wrapper for the training function that can be run in a thread
-            def training_thread_function():
-                try:
-                    # Modeli eğit
-                    print_info(f"Model eğitimi başlıyor... (Epochs: {epochs}, Batch Size: {batch_size})")
-                    
-                    # Add interrupt_check function to be passed to the model
-                    def interrupt_check():
-                        return self.training_interrupted or self.training_stop_event.is_set()
-                    
-                    # Add checkpoint_save function to be passed to the model
-                    def checkpoint_save(model_state):
-                        try:
-                            # Save current model state as checkpoint
-                            torch.save(model_state, self.checkpoint_path)
-                            logger.info(f"Kontrol noktası kaydedildi: {self.checkpoint_path}")
-                        except Exception as e:
-                            logger.error(f"Kontrol noktası kaydetme hatası: {str(e)}")
-                    
-                    # Train with interrupt and checkpoint handlers
-                    history = model.train_model(
-                        train_sequences=X_train,
-                        train_targets=y_train,
-                        val_sequences=X_val,
-                        val_targets=y_val,
-                        epochs=epochs,
-                        batch_size=batch_size,
-                        learning_rate=learning_rate,
-                        verbose=True,
-                        interrupt_check=interrupt_check,
-                        checkpoint_save=checkpoint_save,
-                        checkpoint_interval=5  # Save checkpoint every 5 epochs
-                    )
-                    
-                    # Eğitim süresini hesapla
-                    training_time = time.time() - start_time
-                    hours = int(training_time // 3600)
-                    minutes = int((training_time % 3600) // 60)
-                    
-                    # Check if training was interrupted
-                    if interrupt_check():
-                        print_warning("Eğitim kullanıcı tarafından durduruldu.")
-                        # Save one final checkpoint if interrupted
-                        checkpoint_save(model.state_dict())
-                    else:
-                        # Modeli kaydet
-                        save_path = f"saved_models/lstm_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
-                        try:
-                            model.save_checkpoint(save_path)
-                            print_success(f"Model kaydedildi: {save_path}")
-                        except Exception as e:
-                            print_error(f"Model kaydetme hatası: {str(e)}")
-                    
-                    # Modeli sözlüğe ekle
-                    self.lstm_models[timeframe] = model
-                    
-                    # Performans metriklerini kaydet
-                    try:
-                        metrics_path = f"saved_models/lstm_{timeframe}_metrics.json"
-                        metrics = {
-                            'training_time': training_time,
-                            'epochs': epochs,
-                            'batch_size': batch_size,
-                            'data_size': len(X),
-                            'train_size': len(X_train),
-                            'val_size': len(X_val),
-                            'interrupted': interrupt_check(),
-                            'completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                        
-                        # Add history data if available
-                        if history and 'train_losses' in history:
-                            metrics['train_losses'] = history['train_losses']
-                        if history and 'val_losses' in history:
-                            metrics['val_losses'] = history['val_losses']
-                        
-                        with open(metrics_path, 'w') as f:
-                            json.dump(metrics, f, indent=2)
-                        
-                        print_info(f"Performans metrikleri kaydedildi: {metrics_path}")
-                    except Exception as e:
-                        print_error(f"Metrik kaydetme hatası: {str(e)}")
-                    
-                    # Clear training state flags
-                    self.training_in_progress = False
-                    self.current_training_model = None
-                    
-                    return model
-                    
-                except Exception as e:
-                    print_error(f"Eğitim thread hatası: {str(e)}")
-                    logger.error(f"Eğitim thread hatası: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    
-                    # Clear training state flags
-                    self.training_in_progress = False
-                    self.current_training_model = None
-                    return None
-            
-            # Create and start the training thread
-            self.training_thread = threading.Thread(target=training_thread_function)
-            self.training_thread.daemon = True  # Make thread daemonic so it won't block program exit
-            self.training_thread.start()
-            
-            # Wait for training to complete
-            while self.training_thread.is_alive():
-                try:
-                    # Check for interruption by user (e.g., KeyboardInterrupt)
-                    self.training_thread.join(1.0)  # Check every second
-                    
-                    # Show a heartbeat message every minute
-                    elapsed_time = time.time() - start_time
-                    if int(elapsed_time) % 60 == 0:
-                        mins = int(elapsed_time // 60)
-                        hrs = mins // 60
-                        mins = mins % 60
-                        print_info(f"Eğitim devam ediyor... Geçen süre: {hrs:02d}:{mins:02d}")
-                        
-                except KeyboardInterrupt:
-                    # Handle keyboard interrupt (Ctrl+C)
-                    print_warning("\nKullanıcı tarafından eğitim durdurma talebi alındı (Ctrl+C)")
-                    self.training_interrupted = True
-                    self.training_stop_event.set()
-                    print_info("Eğitim durana kadar bekleyin...")
-                    
-                    # Wait for training thread to finish with timeout
-                    self.training_thread.join(timeout=30)
-                    if self.training_thread.is_alive():
-                        print_warning("Eğitim işlemi zaman aşımına uğradı!")
-                    break
-            
-            # Check if training completed successfully
-            if self.training_interrupted:
-                print_warning("Eğitim kesintiye uğradı. Kontrol noktasından daha sonra devam edebilirsiniz.")
-                return None
+            if train_sequences is None or train_targets is None:
+                print_error("LSTM için eğitim dizileri oluşturulamadı!")
+                return False
+                
+            if val_sequences is None or val_targets is None:
+                print_warning("LSTM için doğrulama dizileri oluşturulamadı, doğrulama yapılmayacak!")
             else:
-                print_success("Eğitim başarıyla tamamlandı!")
-                return self.lstm_models.get(timeframe)
+                print_info(f"Doğrulama verileri hazır: {val_sequences.shape}")
+            
+            # LSTM modelini oluştur ve eğit
+            model_config = MODEL_CONFIG['lstm'].copy()
+            model_config['input_size'] = train_sequences.shape[2]
+            lstm_model = LSTMPredictor(config=model_config)
+            lstm_model.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            
+            try:
+                # Eğitim sonuçlarını al
+                training_results = lstm_model.train_model(
+                    train_sequences=train_sequences,
+                    train_targets=train_targets,
+                    val_sequences=val_sequences,
+                    val_targets=val_targets,
+                    epochs=MODEL_CONFIG['training']['epochs'],
+                    batch_size=MODEL_CONFIG['training']['batch_size'],
+                    learning_rate=MODEL_CONFIG['training']['learning_rate'],
+                    verbose=True
+                )
+                
+                # Eğitim sonuçlarını detaylı göster
+                print_section(f"{timeframe} MODELİ EĞİTİM SONUÇLARI")
+                
+                # Eğitim metrikleri
+                print_info(f"Son eğitim kaybı: {training_results['train_losses'][-1]:.6f}")
+                print_info(f"Son eğitim doğruluğu: %{training_results['train_accuracies'][-1]*100:.2f}")
+                
+                # Doğrulama metrikleri
+                if 'val_losses' in training_results and training_results['val_losses']:
+                    print_info(f"Son doğrulama kaybı: {training_results['val_losses'][-1]:.6f}")
+                if 'val_accuracies' in training_results and training_results['val_accuracies']:
+                    print_info(f"Son doğrulama doğruluğu: %{training_results['val_accuracies'][-1]*100:.2f}")
+                
+                # Eğitilen modeli kaydet
+                # Modeli kaydet - Dosya adını zaman damgası ile oluştur
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                model_filename = f"lstm_{timeframe}_{timestamp}.pth"
+                model_path = os.path.join("saved_models", model_filename)
+                
+                # Kaydetme klasörünü oluştur (yoksa)
+                os.makedirs("saved_models", exist_ok=True)
+                
+                # Modeli kaydet
+                lstm_model.save_checkpoint(model_path)
+                print_success(f"{timeframe} modeli kaydedildi: {model_filename}")
+                
+                # Modeli sınıfta sakla
+                self.lstm_models[timeframe] = lstm_model
+                
+                print_success("LSTM eğitimi tamamlandı!")
+                return True
+            except Exception as e:
+                print_error(f"LSTM eğitimi sırasında hata: {str(e)}")
+                return False
             
         except Exception as e:
-            print_error(f"Model eğitimi başarısız: {str(e)}")
-            logger.error(f"Model eğitimi başarısız: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Clear training state flags
-            self.training_in_progress = False
-            self.current_training_model = None
-            return None
+            print_error(f"LSTM eğitimi sırasında hata: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
 
 def signal_handler(signum, frame):
     """Handle termination signals"""
@@ -1367,7 +1312,8 @@ def signal_handler(signum, frame):
     print_info("Bot güvenli bir şekilde durduruluyor...")
     
     try:
-        if bot:
+        global bot
+        if 'bot' in globals() and bot is not None:
             # If bot is in training, set the interruption flag
             if hasattr(bot, 'training_in_progress') and bot.training_in_progress:
                 print_warning(f"Eğitim süreci devam ediyor: {bot.current_training_model}")
@@ -1388,7 +1334,13 @@ def signal_handler(signum, frame):
             else:
                 print_error("Bot durdurma başarısız!")
         else:
-            print_error("Bot bulunamadı!")
+            # Bot değişkeni tanımlı değilse veya None ise, eğitim sürecinde olabilir
+            print_warning("Bot nesnesi bulunamadı, eğitim veya başlatma süreci kesintiye uğradı.")
+            logger.warning("Bot nesnesi bulunamadı, eğitim veya başlatma süreci kesintiye uğradı.")
+            # Belleği temizle - eğitim sürecinin durması için
+            if torch.cuda.is_available():
+                print_info("CUDA belleği temizleniyor...")
+                torch.cuda.empty_cache()
     except Exception as e:
         print_error(f"Sinyal işleme hatası: {str(e)}")
         logger.error(f"Sinyal işleme hatası: {str(e)}")

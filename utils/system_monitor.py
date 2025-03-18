@@ -5,6 +5,7 @@ from threading import Thread, Event
 import gc
 from typing import Callable
 from config.config import SYSTEM_CONFIG
+from utils.logger import print_info, print_warning
 
 logger = logging.getLogger("TradingBot.SystemMonitor")
 

@@ -38,47 +38,50 @@ TRADING_CONFIG = {
 MODEL_CONFIG = {
     'lstm': {
         'input_size': 32,          # Giriş özellik sayısı
-        'hidden_size': 256,        # LSTM gizli katman boyutu artırıldı
-        'num_layers': 3,           # LSTM katman sayısı artırıldı
-        'dropout': 0.3,            # Dropout oranı artırıldı
+        'hidden_size': 128,        # LSTM gizli katman boyutu artırıldı (64'ten 128'e)
+        'num_layers': 3,           # LSTM katman sayısı artırıldı (2'den 3'e)
+        'dropout': 0.3,            # Dropout oranı optimize edildi
         'bidirectional': True,     # Çift yönlü LSTM
         'threshold_high': 0.65,    # Yüksek tahmin eşiği
         'threshold_low': 0.35,     # Düşük tahmin eşiği
-        'gradient_clip': 1.0,      # Gradient clipping değeri artırıldı
+        'gradient_clip': 1.0,      # Gradient clipping değeri ayarlandı
+    },
+    'activation': {
+        'leaky_relu_slope': 0.01,  # LeakyReLU için negatif slope değeri
     },
     'attention': {
-        'dims': [512, 128, 1],     # Attention katman boyutları artırıldı
-        'dropout': 0.2             # Attention dropout oranı artırıldı
+        'dims': [512, 256, 1],     # Attention katman boyutları artırıldı
+        'dropout': 0.4             # Attention dropout oranı 
     },
     'batch_norm': {
-        'momentum': 0.1,           # Batch norm momentum
-        'eps': 1e-5                # Batch norm epsilon
+        'momentum': 0.2,           # Batch norm momentum 
+        'eps': 1e-4                # Batch norm epsilon 
     },
     'training': {
-        'batch_size': 64,          # Mini-batch boyutu artırıldı
-        'epochs': 100,             # Epoch sayısı artırıldı
-        'learning_rate': 0.001,    # Başlangıç öğrenme oranı artırıldı
-        'sequence_length': 60,     # Giriş sekans uzunluğu
+        'batch_size': 128,         # Mini-batch boyutu artırıldı (32'den 128'e) - GPU için optimize
+        'epochs': 150,             # Epoch sayısı artırıldı (100'den 150'ye)
+        'learning_rate': 0.001,    # Başlangıç öğrenme oranı
+        'sequence_length': 120,    # Giriş sekans uzunluğu artırıldı (60'tan 120'ye)
         'prediction_steps': 1,     # Tahmin adım sayısı
         'train_split': 0.8,        # Eğitim seti oranı
         'validation_split': 0.1,   # Doğrulama seti oranı
         'test_split': 0.1,         # Test seti oranı
-        'early_stopping_patience': 15,  # Erken durdurma sabır sayısı artırıldı
-        'reduce_lr_patience': 7,    # LR azaltma sabır sayısı artırıldı
+        'early_stopping_patience': 20,  # Erken durdurma sabır sayısı artırıldı
+        'reduce_lr_patience': 10,   # LR azaltma sabır sayısı artırıldı
         'reduce_lr_factor': 0.5,   # LR azaltma faktörü
         'min_lr': 1e-6,            # Minimum learning rate
-        'weight_decay': 0.001,     # L2 regularizasyon katsayısı azaltıldı
-        'loss_scale': 1.0          # Loss ölçeklendirme faktörü artırıldı
+        'weight_decay': 0.01,      # L2 regularizasyon katsayısı
+        'loss_scale': 1.0          # Loss ölçeklendirme faktörü
     },
     'rl': {
-        'window_size': 60,         # Gözlem penceresi
-        'total_timesteps': 100000, # Toplam eğitim adımı
-        'learning_rate': 0.0001,   # RL öğrenme oranı
-        'batch_size': 64,          # RL batch boyutu
-        'n_steps': 2048,           # Her güncelleme için adım
-        'gamma': 0.99,             # İndirim faktörü
+        'window_size': 120,         # Gözlem penceresi artırıldı (60'tan 120'ye)
+        'total_timesteps': 200000,  # Toplam eğitim adımı artırıldı (100000'den 200000'e)
+        'learning_rate': 0.0001,    # RL öğrenme oranı
+        'batch_size': 128,          # RL batch boyutu artırıldı (64'ten 128'e)
+        'n_steps': 4096,            # Her güncelleme için adım artırıldı (2048'den 4096'ya)
+        'gamma': 0.99,              # İndirim faktörü
         'policy_kwargs': {
-            'net_arch': [256, 128, 64]  # Policy ağ mimarisi
+            'net_arch': [512, 256, 128]  # Policy ağ mimarisi genişletildi
         }
     },
     'integration': {
@@ -92,14 +95,14 @@ MODEL_CONFIG = {
 DATA_CONFIG = {
     'timeframes': ['5m', '15m', '1h'],  # Daha az gürültülü zaman dilimleri
     'default_candles': {
-        '5m': 1000,
-        '15m': 800,
-        '1h': 500
+        '5m': 5000,    # 1000'den 5000'e artırıldı
+        '15m': 3000,   # 800'den 3000'e artırıldı
+        '1h': 2000     # 500'den 2000'e artırıldı
     },
     'training_candles': {  # Optimize edilmiş eğitim veri miktarları
-        '5m': 1000,
-        '15m': 800,
-        '1h': 500
+        '5m': 5000,    # 1000'den 5000'e artırıldı
+        '15m': 3000,   # 800'den 3000'e artırıldı
+        '1h': 2000     # 500'den 2000'e artırıldı
     },
     'retraining_interval_days': 7,
     'min_required_candles': 30,

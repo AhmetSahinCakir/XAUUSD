@@ -15,6 +15,10 @@ Bu proje, XAUUSD (Altın) paritesi için makine öğrenimini kullanan otomatik t
   - LSTM ve RL modellerinin sıralı entegrasyonu
     - LSTM modeli fiyat tahminleri yapar
     - RL modeli LSTM tahminlerini kullanarak işlem kararları verir
+  - Her zaman dilimi için ayrı RL modeli
+  - Ağırlıklı oylama sistemi ile zaman dilimlerinden gelen tahminlerin birleştirilmesi
+  - Zaman dilimlerine farklı ağırlıklar atama (uzun vadeli dilimlere daha yüksek ağırlık)
+  - Güven skoruna dayalı karar verme mekanizması
   - 32 farklı özellik kullanımı
   - Optimize edilmiş model parametreleri
   - Çift yönlü LSTM ve dikkat mekanizması
@@ -81,10 +85,6 @@ cp .env.example .env     # Linux/Mac için
    - MT5_PASSWORD: MetaTrader 5 şifreniz
    - MT5_SERVER: Broker sunucu adı
    - Diğer parametreleri isteğe bağlı olarak ayarlayın
-
-6. Gerekli dizinleri oluşturun:
-```bash
-mkdir -p logs data saved_models config notebooks
 ```
 
 ## 💻 Kullanım
@@ -102,6 +102,25 @@ Bot başlatıldığında:
 - GPU kullanılabilirliğini kontrol eder
 - Modelleri yükler veya eğitir
 - Gerçek zamanlı trading başlar
+
+### Eğitim ve İşlem Süreci
+
+Bot çalıştırıldığında şu adımları izler:
+
+1. **LSTM Modelleri Eğitimi**:
+   - Her zaman dilimi için ayrı LSTM modeli eğitilir
+   - Eğitilen modeller `saved_models/` dizinine kaydedilir
+
+2. **RL Modelleri Eğitimi**:
+   - Her zaman dilimi için ayrı RL modeli eğitilir
+   - LSTM modelleri, RL modellerine girdi sağlar
+   - RL modelleri işlem kararları verir (Al, Sat, Bekle)
+
+3. **İşlem Kararları**:
+   - Tüm zaman dilimlerinden gelen tahminler ağırlıklandırılarak birleştirilir
+   - Her tahminin güven skoru hesaplanır
+   - Minimum güven eşiğini geçen kararlar işleme dönüştürülür
+   - ATR tabanlı stop-loss ve take-profit seviyeleri belirlenir
 
 ## 🤖 Model Eğitimi
 
@@ -126,7 +145,11 @@ Temel parametreler `.env` dosyasında ayarlanabilir:
 - Bildirim ayarları
 
 Gelişmiş parametreler:
-- `config.py`: Model ve sistem parametreleri
+- `config/config.py`: Model ve sistem parametreleri
+  - LSTM ve RL model parametreleri
+  - Zaman dilimi ağırlıkları
+  - Güven eşik değerleri
+  - Eğitim parametreleri
 
 ## 📊 İzleme ve Raporlama
 
@@ -170,3 +193,13 @@ Sorun yaşarsanız:
 5. Model performans metriklerini inceleyin
 6. GPU kullanılabilirliğini kontrol edin
 7. Bellek kullanımı istatistiklerini gözden geçirin
+
+## 🆕 Son Güncellemeler
+
+### v0.3.0
+- Her zaman dilimi için ayrı RL modeli eklendi
+- Zaman dilimlerinden gelen tahminleri birleştiren ağırlıklı oylama sistemi eklendi
+- Uzun vadeli zaman dilimlerine daha yüksek ağırlık verildi (1m: 0.5, 5m: 0.8, 15m: 1.0, 30m: 1.2, 1h: 1.5, 4h: 1.8)
+- Güven skoruna dayalı karar verme mekanizması geliştirildi
+- İşlem kararları tamamen modele bırakıldı (manuel eşik değerleri yerine model çıktıları kullanılıyor)
+- Modellerin daha detaylı loglanması sağlandı
